@@ -127,7 +127,11 @@ static int nr_crypto_nss_hmac(UCHAR* key, size_t keyl, UCHAR* buf, size_t bufl,
   CK_MECHANISM_TYPE mech = CKM_SHA_1_HMAC;
   PK11SlotInfo* slot = nullptr;
   MOZ_ASSERT(keyl > 0);
-  SECItem keyi = {siBuffer, key, static_cast<unsigned int>(keyl)};
+  // Both PK11_KeyGen and PK11_Derive expect `keyl` to be an int
+  MOZ_ASSERT(keyl < sizeof(int));
+  CK_KEY_DERIVATION_STRING_DATA idkey = {key, keyl};
+  SECItem keyi = {siBuffer, (unsigned char*)&idkey, sizeof(idkey)};
+  PK11SymKey* tmpKey = nullptr;
   PK11SymKey* skey = nullptr;
   PK11Context* hmac_ctx = nullptr;
   SECStatus status;
@@ -138,8 +142,13 @@ static int nr_crypto_nss_hmac(UCHAR* key, size_t keyl, UCHAR* buf, size_t bufl,
   slot = PK11_GetInternalKeySlot();
   if (!slot) goto abort;
 
-  skey = PK11_ImportSymKey(slot, mech, PK11_OriginUnwrap, CKA_SIGN, &keyi,
-                           nullptr);
+  // PK11_ImportSymKey is not allowed to be called in FIPS-mode.
+  // We use PK11_Derive instead. The resulting key/HMAC is the same.
+  tmpKey = PK11_KeyGen(slot, mech, nullptr, static_cast<int>(keyl), nullptr);
+  if (!tmpKey) goto abort;
+
+  skey = PK11_Derive(tmpKey, CKM_CONCATENATE_DATA_AND_BASE, &keyi, mech,
+                     CKA_SIGN, static_cast<int>(keyl));
   if (!skey) goto abort;
 
   hmac_ctx = PK11_CreateContextBySymKey(mech, CKA_SIGN, skey, &param);
@@ -160,6 +169,7 @@ static int nr_crypto_nss_hmac(UCHAR* key, size_t keyl, UCHAR* buf, size_t bufl,
 
 abort:
   if (hmac_ctx) PK11_DestroyContext(hmac_ctx, PR_TRUE);
+  if (tmpKey) PK11_FreeSymKey(tmpKey);
   if (skey) PK11_FreeSymKey(skey);
   if (slot) PK11_FreeSlot(slot);
 
