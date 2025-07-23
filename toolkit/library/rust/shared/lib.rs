@@ -51,6 +51,8 @@ extern crate signature_cache;
 extern crate static_prefs;
 extern crate storage;
 extern crate webrender_bindings;
+#[cfg(target_os = "linux")]
+extern crate xdg_portal_auth_service;
 extern crate xpcom;
 
 extern crate audio_thread_priority;

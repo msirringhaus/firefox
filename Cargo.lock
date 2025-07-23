@@ -2694,6 +2694,7 @@ dependencies = [
  "wgpu_bindings",
  "widget_windows",
  "wpf-gpu-raster",
+ "xdg_portal_auth_service",
  "xpcom",
 ]
 
@@ -8408,6 +8409,26 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "xdg_portal_auth_service"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cstr",
+ "dbus",
+ "log",
+ "moz_task",
+ "nserror",
+ "nsstring",
+ "rand",
+ "serde",
+ "serde_cbor",
+ "serde_json",
+ "static_prefs",
+ "thin-vec",
+ "xpcom",
+]
 
 [[package]]
 name = "xml-rs"
