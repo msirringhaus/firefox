@@ -20,6 +20,7 @@ nsresult authrs_webauthn_att_obj_constructor(
     const nsTArray<uint8_t>& attestation, bool anonymize,
     nsIWebAuthnAttObj** result);
 
+nsresult xdg_portal_auth_service_if_available(nsIWebAuthnService** result);
 }  // extern "C"
 
 #endif  // mozilla_dom_AuthrsBridge_ffi_h

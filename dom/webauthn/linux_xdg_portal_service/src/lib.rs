@@ -1,0 +1,890 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#[macro_use]
+extern crate xpcom;
+
+use base64::Engine;
+use base64::{self, engine::general_purpose::URL_SAFE_NO_PAD};
+use dbus::arg::{RefArg, Variant};
+use nserror::{
+    nsresult, NS_ERROR_DOM_ABORT_ERR, NS_ERROR_DOM_NOT_ALLOWED_ERR, NS_ERROR_FAILURE,
+    NS_ERROR_NOT_AVAILABLE, NS_ERROR_NOT_IMPLEMENTED, NS_OK,
+};
+use nsstring::{nsACString, nsAString, nsCString, nsString};
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+use thin_vec::{thin_vec, ThinVec};
+use xpcom::interfaces::{
+    nsICredentialParameters, nsIWebAuthnAutoFillEntry, nsIWebAuthnRegisterArgs,
+    nsIWebAuthnRegisterPromise, nsIWebAuthnService, nsIWebAuthnSignArgs, nsIWebAuthnSignPromise,
+};
+use xpcom::{xpcom_method, RefPtr};
+mod register;
+use register::RegisterPromise;
+pub use register::WebAuthnRegisterResult;
+
+mod sign;
+use sign::SignPromise;
+
+mod dbus_controller;
+use dbus_controller::DbusController;
+
+// fn authrs_to_nserror(e: AuthenticatorError) -> nsresult {
+//     match e {
+//         AuthenticatorError::CredentialExcluded => NS_ERROR_DOM_INVALID_STATE_ERR,
+//         _ => NS_ERROR_DOM_NOT_ALLOWED_ERR,
+//     }
+// }
+
+#[derive(Clone)]
+enum TransactionPromise {
+    Register(RegisterPromise),
+    Sign(SignPromise),
+}
+
+impl TransactionPromise {
+    fn reject(&self, err: nsresult) -> Result<(), nsresult> {
+        match self {
+            TransactionPromise::Register(promise) => promise.resolve_or_reject(Err(err)),
+            TransactionPromise::Sign(promise) => promise.resolve_or_reject(Err(err)),
+        }
+    }
+}
+
+// enum TransactionArgs {
+//     Sign(/* timeout */ u64),
+// }
+
+struct TransactionState {
+    tid: u64,
+    browsing_context_id: u64,
+    // pending_args: Option<TransactionArgs>,
+    promise: TransactionPromise,
+}
+
+// XdgPortalAuthService provides an nsIWebAuthnService built on top of authenticator-rs.
+#[xpcom(implement(nsIWebAuthnService), atomic)]
+pub struct XdgPortalAuthService {
+    dbus_controller: Mutex<DbusController>,
+    transaction: Arc<Mutex<Option<TransactionState>>>,
+}
+
+impl XdgPortalAuthService {
+    xpcom_method!(get_is_uvpaa => GetIsUVPAA() -> bool);
+    fn get_is_uvpaa(&self) -> Result<bool, nsresult> {
+        todo!();
+        // if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
+        //     Ok(false)
+        // } else if static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
+        //     Ok(self.test_token_manager.has_platform_authenticator())
+        // } else {
+        //     Err(NS_ERROR_NOT_AVAILABLE)
+        // }
+    }
+
+    xpcom_method!(make_credential => MakeCredential(aTid: u64, aBrowsingContextId: u64, aArgs: *const nsIWebAuthnRegisterArgs, aPromise: *const nsIWebAuthnRegisterPromise));
+    fn make_credential(
+        &self,
+        tid: u64,
+        browsing_context_id: u64,
+        args: &nsIWebAuthnRegisterArgs,
+        promise: &nsIWebAuthnRegisterPromise,
+    ) -> Result<(), nsresult> {
+        self.reset()?;
+
+        let promise = RegisterPromise(RefPtr::new(promise));
+
+        let mut challenge = ThinVec::new();
+        unsafe { args.GetChallenge(&mut challenge) }.to_result()?;
+        let challenge_str = URL_SAFE_NO_PAD.encode(challenge);
+
+        let mut origin = nsString::new();
+        unsafe { args.GetOrigin(&mut *origin) }.to_result()?;
+
+        let mut relying_party_id = nsString::new();
+        unsafe { args.GetRpId(&mut *relying_party_id) }.to_result()?;
+
+        // let mut client_data_hash = ThinVec::new();
+        // unsafe { args.GetClientDataHash(&mut client_data_hash) }.to_result()?;
+        // let client_data_hash_str = URL_SAFE_NO_PAD.encode(&client_data_hash);
+
+        let mut timeout_ms = 0u32;
+        unsafe { args.GetTimeoutMS(&mut timeout_ms) }.to_result()?;
+
+        let mut exclude_list_ids = ThinVec::new();
+        unsafe { args.GetExcludeList(&mut exclude_list_ids) }.to_result()?;
+        let exclude_list: Vec<_> = exclude_list_ids
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": URL_SAFE_NO_PAD.encode(&id),
+                    "type": "public-key",
+                })
+            })
+            .collect();
+
+        let mut relying_party_name = nsString::new();
+        unsafe { args.GetRpName(&mut *relying_party_name) }.to_result()?;
+
+        let mut user_id = ThinVec::new();
+        unsafe { args.GetUserId(&mut user_id) }.to_result()?;
+        let user_id_str = URL_SAFE_NO_PAD.encode(user_id);
+
+        let mut user_name = nsString::new();
+        unsafe { args.GetUserName(&mut *user_name) }.to_result()?;
+
+        let mut user_display_name = nsString::new();
+        unsafe { args.GetUserDisplayName(&mut *user_display_name) }.to_result()?;
+
+        let mut cose_algs = ThinVec::new();
+        unsafe { args.GetCoseAlgs(&mut cose_algs) }.to_result()?;
+        let pub_key_cred_params: Vec<_> = cose_algs
+            .iter()
+            .map(|alg| {
+                json!({
+                    "alg": alg,
+                    "type": "public-key",
+                })
+            })
+            .collect();
+
+        let mut resident_key = nsString::new();
+        unsafe { args.GetResidentKey(&mut *resident_key) }.to_result()?;
+
+        let mut user_verification = nsString::new();
+        unsafe { args.GetUserVerification(&mut *user_verification) }.to_result()?;
+
+        // let mut authenticator_attachment = nsString::new();
+        // if unsafe { args.GetAuthenticatorAttachment(&mut *authenticator_attachment) }
+        //     .to_result()
+        //     .is_ok()
+        // {
+        //     if authenticator_attachment.eq("platform") {
+        //         return Err(NS_ERROR_FAILURE);
+        //     }
+        // }
+
+        // let mut credential_protection_policy = None;
+        // let mut enforce_credential_protection_policy = None;
+        // let mut cred_protect_policy_value = nsCString::new();
+        // let mut enforce_cred_protect_value = false;
+        // if unsafe { args.GetCredentialProtectionPolicy(&mut *cred_protect_policy_value) }
+        //     .to_result()
+        //     .is_ok()
+        // {
+        //     unsafe { args.GetEnforceCredentialProtectionPolicy(&mut enforce_cred_protect_value) }
+        //         .to_result()?;
+        //     credential_protection_policy = if cred_protect_policy_value
+        //         .eq("userVerificationOptional")
+        //     {
+        //         Some(CredentialProtectionPolicy::UserVerificationOptional)
+        //     } else if cred_protect_policy_value.eq("userVerificationOptionalWithCredentialIDList") {
+        //         Some(CredentialProtectionPolicy::UserVerificationOptionalWithCredentialIDList)
+        //     } else if cred_protect_policy_value.eq("userVerificationRequired") {
+        //         Some(CredentialProtectionPolicy::UserVerificationRequired)
+        //     } else {
+        //         return Err(NS_ERROR_FAILURE);
+        //     };
+        //     enforce_credential_protection_policy = Some(enforce_cred_protect_value);
+        // }
+
+        // let mut cred_props = false;
+        // unsafe { args.GetCredProps(&mut cred_props) }.to_result()?;
+
+        // let mut min_pin_length = false;
+        // unsafe { args.GetMinPinLength(&mut min_pin_length) }.to_result()?;
+
+        // let prf_input = (|| -> Option<AuthenticationExtensionsPRFInputs> {
+        //     let mut prf: bool = false;
+        //     unsafe { args.GetPrf(&mut prf) }.to_result().ok()?;
+        //     if !prf {
+        //         return None;
+        //     }
+
+        //     let eval = || -> Option<AuthenticationExtensionsPRFValues> {
+        //         let mut prf_eval_first: ThinVec<u8> = ThinVec::new();
+        //         let mut prf_eval_second: ThinVec<u8> = ThinVec::new();
+        //         unsafe { args.GetPrfEvalFirst(&mut prf_eval_first) }
+        //             .to_result()
+        //             .ok()?;
+        //         let has_second = unsafe { args.GetPrfEvalSecond(&mut prf_eval_second) }
+        //             .to_result()
+        //             .is_ok();
+        //         Some(AuthenticationExtensionsPRFValues {
+        //             first: prf_eval_first.to_vec(),
+        //             second: has_second.then(|| prf_eval_second.to_vec()),
+        //         })
+        //     }();
+
+        //     Some(AuthenticationExtensionsPRFInputs {
+        //         eval,
+        //         eval_by_credential: None,
+        //     })
+        // })();
+
+        // let mut hmac_create_secret = None;
+        // let mut maybe_hmac_create_secret = false;
+        // if unsafe { args.GetHmacCreateSecret(&mut maybe_hmac_create_secret) }
+        //     .to_result()
+        //     .is_ok()
+        // {
+        //     hmac_create_secret = Some(maybe_hmac_create_secret);
+        // }
+
+        let json_str = json!({
+            "challenge": challenge_str,
+            "rp": {
+                "id": relying_party_id.to_string(),
+                "name": relying_party_name.to_string(),
+            },
+            "user": {
+                "id": user_id_str,
+                "name": user_name.to_string(),
+                "display_name": user_display_name.to_string(),
+            },
+            "timeout": timeout_ms,
+            "excludeCredentials": exclude_list,
+            "pubKeyCredParams": pub_key_cred_params,
+        })
+        .to_string();
+
+        // We need to craft a message like this:
+        // req = {
+        //     "type": Variant('s', "publicKey"),
+        //     "origin": Variant('s', origin),
+        //     "is_same_origin": Variant('b', is_same_origin),
+        //     "publicKey": Variant('a{sv}', {
+        //         "request_json": Variant('s', req_json)
+        //     })
+        // }
+
+        // --- Build the inner dictionary for "publicKey" ---
+        // This corresponds to the a{sv} value of the "publicKey" key.
+        let mut public_key_dict = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
+        public_key_dict.insert("request_json".to_string(), Variant(Box::new(json_str)));
+
+        // --- Build the main dictionary payload ---
+        // This is the top-level a{sv} structure.
+        let mut req = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
+        req.insert(
+            "type".to_string(),
+            Variant(Box::new("publicKey".to_string())),
+        );
+        req.insert("origin".to_string(), Variant(Box::new(origin.to_string())));
+        req.insert(
+            "is_same_origin".to_string(),
+            Variant(Box::new(true)), // TODO!
+        );
+        req.insert(
+            "publicKey".to_string(),
+            // The inner dictionary must also be wrapped in a Variant
+            Variant(Box::new(public_key_dict)),
+        );
+        let mut guard = self.transaction.lock().unwrap();
+        *guard = Some(TransactionState {
+            tid,
+            browsing_context_id,
+            // pending_args: None,
+            promise: TransactionPromise::Register(promise),
+        });
+        // drop the guard here to ensure we don't deadlock if the call to `register()` below
+        // hairpins the state callback.
+        drop(guard);
+
+        let dbus = self.dbus_controller.lock().unwrap();
+        let result = dbus.send_create_credential(req);
+        drop(dbus);
+
+        let mut guard = self.transaction.lock().unwrap();
+        let Some(state) = guard.as_mut() else {
+            return Err(NS_ERROR_FAILURE);
+        };
+        if state.tid != tid {
+            return Err(NS_ERROR_FAILURE);
+        }
+        let TransactionPromise::Register(ref promise) = state.promise else {
+            return Err(NS_ERROR_FAILURE);
+        };
+        let _ = promise.resolve_or_reject(result); // TODO: Do correct error mapping here
+        *guard = None;
+        Ok(())
+    }
+
+    xpcom_method!(set_has_attestation_consent => SetHasAttestationConsent(aTid: u64, aHasConsent: bool));
+    fn set_has_attestation_consent(&self, _tid: u64, _has_consent: bool) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(get_assertion => GetAssertion(aTid: u64, aBrowsingContextId: u64, aArgs: *const nsIWebAuthnSignArgs, aPromise: *const nsIWebAuthnSignPromise));
+    fn get_assertion(
+        &self,
+        tid: u64,
+        browsing_context_id: u64,
+        args: &nsIWebAuthnSignArgs,
+        promise: &nsIWebAuthnSignPromise,
+    ) -> Result<(), nsresult> {
+        self.reset()?;
+
+        let promise = SignPromise(RefPtr::new(promise));
+
+        let mut challenge = ThinVec::new();
+        unsafe { args.GetChallenge(&mut challenge) }.to_result()?;
+        let challenge_str = URL_SAFE_NO_PAD.encode(challenge);
+
+        let mut origin = nsString::new();
+        unsafe { args.GetOrigin(&mut *origin) }.to_result()?;
+
+        let mut relying_party_id = nsString::new();
+        unsafe { args.GetRpId(&mut *relying_party_id) }.to_result()?;
+
+        // let mut client_data_hash = ThinVec::new();
+        // unsafe { args.GetClientDataHash(&mut client_data_hash) }.to_result()?;
+        // let client_data_hash_str = URL_SAFE_NO_PAD.encode(&client_data_hash);
+
+        let mut timeout_ms = 0u32;
+        unsafe { args.GetTimeoutMS(&mut timeout_ms) }.to_result()?;
+
+        let mut allow_list_ids = ThinVec::new();
+        unsafe { args.GetAllowList(&mut allow_list_ids) }.to_result()?;
+        let allow_list: Vec<_> = allow_list_ids
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": URL_SAFE_NO_PAD.encode(&id),
+                    "type": "public-key",
+                })
+            })
+            .collect();
+
+        let mut user_verification = nsString::new();
+        unsafe { args.GetUserVerification(&mut *user_verification) }.to_result()?;
+
+        // let mut app_id = None;
+        // let mut maybe_app_id = nsString::new();
+        // match unsafe { args.GetAppId(&mut *maybe_app_id) }.to_result() {
+        //     Ok(_) => app_id = Some(maybe_app_id.to_string()),
+        //     _ => (),
+        // }
+
+        // let prf_input = || -> Option<AuthenticationExtensionsPRFInputs> {
+        //     let mut prf: bool = false;
+        //     unsafe { args.GetPrf(&mut prf) }.to_result().ok()?;
+        //     if !prf {
+        //         return None;
+        //     }
+
+        //     let eval = || -> Option<AuthenticationExtensionsPRFValues> {
+        //         let mut prf_eval_first: ThinVec<u8> = ThinVec::new();
+        //         let mut prf_eval_second: ThinVec<u8> = ThinVec::new();
+        //         unsafe { args.GetPrfEvalFirst(&mut prf_eval_first) }
+        //             .to_result()
+        //             .ok()?;
+        //         let has_second = unsafe { args.GetPrfEvalSecond(&mut prf_eval_second) }
+        //             .to_result()
+        //             .is_ok();
+        //         Some(AuthenticationExtensionsPRFValues {
+        //             first: prf_eval_first.to_vec(),
+        //             second: has_second.then(|| prf_eval_second.to_vec()),
+        //         })
+        //     }();
+
+        //     let eval_by_credential =
+        //         || -> Option<HashMap<Vec<u8>, AuthenticationExtensionsPRFValues>> {
+        //             let mut credential_ids: ThinVec<ThinVec<u8>> = ThinVec::new();
+        //             let mut eval_by_cred_firsts: ThinVec<ThinVec<u8>> = ThinVec::new();
+        //             let mut eval_by_cred_second_maybes: ThinVec<bool> = ThinVec::new();
+        //             let mut eval_by_cred_seconds: ThinVec<ThinVec<u8>> = ThinVec::new();
+        //             unsafe { args.GetPrfEvalByCredentialCredentialId(&mut credential_ids) }
+        //                 .to_result()
+        //                 .ok()?;
+        //             unsafe { args.GetPrfEvalByCredentialEvalFirst(&mut eval_by_cred_firsts) }
+        //                 .to_result()
+        //                 .ok()?;
+        //             unsafe {
+        //                 args.GetPrfEvalByCredentialEvalSecondMaybe(&mut eval_by_cred_second_maybes)
+        //             }
+        //             .to_result()
+        //             .ok()?;
+        //             unsafe { args.GetPrfEvalByCredentialEvalSecond(&mut eval_by_cred_seconds) }
+        //                 .to_result()
+        //                 .ok()?;
+        //             if credential_ids.len() != eval_by_cred_firsts.len()
+        //                 || credential_ids.len() != eval_by_cred_second_maybes.len()
+        //                 || credential_ids.len() != eval_by_cred_seconds.len()
+        //             {
+        //                 return None;
+        //             }
+        //             let mut result = HashMap::new();
+        //             for i in 0..credential_ids.len() {
+        //                 result.insert(
+        //                     credential_ids[i].to_vec(),
+        //                     AuthenticationExtensionsPRFValues {
+        //                         first: eval_by_cred_firsts[i].to_vec(),
+        //                         second: eval_by_cred_second_maybes[i]
+        //                             .then(|| eval_by_cred_seconds[i].to_vec()),
+        //                     },
+        //                 );
+        //             }
+        //             Some(result)
+        //         }();
+
+        //     Some(AuthenticationExtensionsPRFInputs {
+        //         eval,
+        //         eval_by_credential,
+        //     })
+        // }();
+
+        // // https://w3c.github.io/webauthn/#prf-extension
+        // // "The hmac-secret extension provides two PRFs per credential: one which is used for
+        // // requests where user verification is performed and another for all other requests.
+        // // This extension [PRF] only exposes a single PRF per credential and, when implementing
+        // // on top of hmac-secret, that PRF MUST be the one used for when user verification is
+        // // performed. This overrides the UserVerificationRequirement if neccessary."
+        // if prf_input.is_some() && user_verification_req == UserVerificationRequirement::Discouraged
+        // {
+        //     user_verification_req = UserVerificationRequirement::Preferred;
+        // }
+
+        // let mut conditionally_mediated = false;
+        // unsafe { args.GetConditionallyMediated(&mut conditionally_mediated) }.to_result()?;
+
+        let json_str = json!({
+            "challenge": challenge_str,
+            "timeout": timeout_ms,
+            "rpId": relying_party_id.to_string(),
+            "allowCredentials": allow_list,
+            "userVerification": user_verification.to_string(),
+            // "hints": [],
+            // "extensions": "",
+        })
+        .to_string();
+
+        // We need to craft a message like this:
+        // req = {
+        //     "type": Variant('s', "publicKey"),
+        //     "origin": Variant('s', origin),
+        //     "is_same_origin": Variant('b', is_same_origin),
+        //     "publicKey": Variant('a{sv}', {
+        //         "request_json": Variant('s', req_json)
+        //     })
+        // }
+        // --- Build the inner dictionary for "publicKey" ---
+        // This corresponds to the a{sv} value of the "publicKey" key.
+        let mut public_key_dict = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
+        public_key_dict.insert("request_json".to_string(), Variant(Box::new(json_str)));
+
+        // --- Build the main dictionary payload ---
+        // This is the top-level a{sv} structure.
+        let mut req = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
+        req.insert(
+            "type".to_string(),
+            Variant(Box::new("publicKey".to_string())),
+        );
+        req.insert("origin".to_string(), Variant(Box::new(origin.to_string())));
+        req.insert(
+            "is_same_origin".to_string(),
+            Variant(Box::new(true)), // TODO!
+        );
+        req.insert(
+            "publicKey".to_string(),
+            // The inner dictionary must also be wrapped in a Variant
+            Variant(Box::new(public_key_dict)),
+        );
+        let mut guard = self.transaction.lock().unwrap();
+        *guard = Some(TransactionState {
+            tid,
+            browsing_context_id,
+            // pending_args: None,
+            promise: TransactionPromise::Sign(promise),
+        });
+        // drop the guard here to ensure we don't deadlock if the call to `register()` below
+        // hairpins the state callback.
+        drop(guard);
+
+        let dbus = self.dbus_controller.lock().unwrap();
+        let result = dbus.send_get_credential(req);
+        drop(dbus);
+
+        let mut guard = self.transaction.lock().unwrap();
+        let Some(state) = guard.as_mut() else {
+            return Err(NS_ERROR_FAILURE);
+        };
+        if state.tid != tid {
+            return Err(NS_ERROR_FAILURE);
+        }
+        let TransactionPromise::Sign(ref promise) = state.promise else {
+            return Err(NS_ERROR_FAILURE);
+        };
+        let _ = promise.resolve_or_reject(result); // TODO: Do correct error mapping here
+        *guard = None;
+        Ok(())
+
+        // if !conditionally_mediated {
+        //     // Immediately proceed to the modal UI flow.
+        //     self.do_get_assertion(None, guard)
+        // } else {
+        //     // Cache the request and wait for the conditional UI to request autofill entries, etc.
+        //     Ok(())
+        // }
+    }
+
+    fn do_get_assertion(
+        &self,
+        mut _selected_credential_id: Option<Vec<u8>>,
+        mut _guard: MutexGuard<Option<TransactionState>>,
+    ) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+        // let Some(state) = guard.as_mut() else {
+        //     return Err(NS_ERROR_FAILURE);
+        // };
+        // let browsing_context_id = state.browsing_context_id;
+        // let tid = state.tid;
+        // let (timeout_ms, mut info) = match state.pending_args.take() {
+        //     Some(TransactionArgs::Sign(timeout_ms, info)) => (timeout_ms, info),
+        //     _ => return Err(NS_ERROR_FAILURE),
+        // };
+
+        // if let Some(id) = selected_credential_id.take() {
+        //     if info.allow_list.is_empty() {
+        //         info.allow_list.push(PublicKeyCredentialDescriptor {
+        //             id,
+        //             transports: vec![],
+        //         });
+        //     } else {
+        //         // We need to ensure that the selected credential id
+        //         // was in the original allow_list.
+        //         info.allow_list.retain(|cred| cred.id == id);
+        //         if info.allow_list.is_empty() {
+        //             return Err(NS_ERROR_FAILURE);
+        //         }
+        //     }
+        // }
+
+        // let (status_tx, status_rx) = channel::<StatusUpdate>();
+        // let status_transaction = self.transaction.clone();
+        // let status_origin = info.origin.to_string();
+        // RunnableBuilder::new(
+        //     "XdgPortalAuthService::GetAssertion::StatusReceiver",
+        //     move || {
+        //         let _ = status_callback(
+        //             status_rx,
+        //             tid,
+        //             &status_origin,
+        //             browsing_context_id,
+        //             status_transaction,
+        //         );
+        //     },
+        // )
+        // .may_block(true)
+        // .dispatch_background_task()?;
+
+        // let uniq_allowed_cred = if info.allow_list.len() == 1 {
+        //     info.allow_list.first().cloned()
+        // } else {
+        //     None
+        // };
+
+        // let callback_transaction = self.transaction.clone();
+        // let state_callback = StateCallback::<Result<SignResult, AuthenticatorError>>::new(
+        //     Box::new(move |mut result| {
+        //         let mut guard = callback_transaction.lock().unwrap();
+        //         let Some(state) = guard.as_mut() else {
+        //             return;
+        //         };
+        //         if state.tid != tid {
+        //             return;
+        //         }
+        //         let TransactionPromise::Sign(ref promise) = state.promise else {
+        //             return;
+        //         };
+        //         if uniq_allowed_cred.is_some() {
+        //             // In CTAP 2.0, but not CTAP 2.1, the assertion object's credential field
+        //             // "May be omitted if the allowList has exactly one credential." If we had
+        //             // a unique allowed credential, then copy its descriptor to the output.
+        //             if let Ok(inner) = result.as_mut() {
+        //                 inner.assertion.credentials = uniq_allowed_cred;
+        //             }
+        //         }
+        //         if should_cancel_prompts(&result) {
+        //             // Some errors are accompanied by prompts that should persist after the
+        //             // operation terminates.
+        //             let _ = cancel_prompts(tid);
+        //         }
+        //         let _ = promise.resolve_or_reject(result.map_err(authrs_to_nserror));
+        //         *guard = None;
+        //     }),
+        // );
+
+        // // TODO(Bug 1855290) Remove this presence prompt
+        // send_prompt(
+        //     BrowserPromptType::Presence,
+        //     tid,
+        //     Some(&info.origin),
+        //     Some(browsing_context_id),
+        // )?;
+
+        // // As in `register`, we are intentionally avoiding `AuthenticatorService` here.
+        // if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
+        //     self.usb_token_manager.lock().unwrap().sign(
+        //         timeout_ms as u64,
+        //         info,
+        //         status_tx,
+        //         state_callback,
+        //     );
+        // } else if static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
+        //     self.test_token_manager
+        //         .sign(timeout_ms as u64, info, status_tx, state_callback);
+        // } else {
+        //     return Err(NS_ERROR_FAILURE);
+        // }
+
+        // Ok(())
+    }
+
+    xpcom_method!(has_pending_conditional_get => HasPendingConditionalGet(aBrowsingContextId: u64, aOrigin: *const nsAString) -> u64);
+    fn has_pending_conditional_get(
+        &self,
+        _browsing_context_id: u64,
+        _origin: &nsAString,
+    ) -> Result<u64, nsresult> {
+        Ok(0)
+        // let mut guard = self.transaction.lock().unwrap();
+        // let Some(state) = guard.as_mut() else {
+        //     return Ok(0);
+        // };
+        // let Some(TransactionArgs::Sign(_, info)) = state.pending_args.as_ref() else {
+        //     return Ok(0);
+        // };
+        // if state.browsing_context_id != browsing_context_id {
+        //     return Ok(0);
+        // }
+        // if !info.origin.eq(&origin.to_string()) {
+        //     return Ok(0);
+        // }
+        // Ok(state.tid)
+    }
+
+    xpcom_method!(get_autofill_entries => GetAutoFillEntries(aTransactionId: u64) -> ThinVec<Option<RefPtr<nsIWebAuthnAutoFillEntry>>>);
+    fn get_autofill_entries(
+        &self,
+        tid: u64,
+    ) -> Result<ThinVec<Option<RefPtr<nsIWebAuthnAutoFillEntry>>>, nsresult> {
+        let mut guard = self.transaction.lock().unwrap();
+        let Some(state) = guard.as_mut() else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+        if state.tid != tid {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        }
+        // let Some(TransactionArgs::Sign(_)) = state.pending_args.as_ref() else {
+        //     return Err(NS_ERROR_NOT_AVAILABLE);
+        // };
+        if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
+            // We don't currently support silent discovery for credentials on USB tokens.
+            return Ok(thin_vec![]);
+        // } else if static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
+        //     return self
+        //         .test_token_manager
+        //         .get_autofill_entries(&info.relying_party_id, &info.allow_list);
+        } else {
+            return Err(NS_ERROR_FAILURE);
+        }
+    }
+
+    xpcom_method!(select_autofill_entry => SelectAutoFillEntry(aTid: u64, aCredentialId: *const ThinVec<u8>));
+    fn select_autofill_entry(&self, tid: u64, credential_id: &ThinVec<u8>) -> Result<(), nsresult> {
+        let mut guard = self.transaction.lock().unwrap();
+        let Some(state) = guard.as_mut() else {
+            return Err(NS_ERROR_FAILURE);
+        };
+        if tid != state.tid {
+            return Err(NS_ERROR_FAILURE);
+        }
+        self.do_get_assertion(Some(credential_id.to_vec()), guard)
+    }
+
+    xpcom_method!(resume_conditional_get => ResumeConditionalGet(aTid: u64));
+    fn resume_conditional_get(&self, tid: u64) -> Result<(), nsresult> {
+        let mut guard = self.transaction.lock().unwrap();
+        let Some(state) = guard.as_mut() else {
+            return Err(NS_ERROR_FAILURE);
+        };
+        if tid != state.tid {
+            return Err(NS_ERROR_FAILURE);
+        }
+        self.do_get_assertion(None, guard)
+    }
+
+    // Clears the transaction state if tid matches the ongoing transaction ID.
+    // Returns whether the tid was a match.
+    fn clear_transaction(&self, tid: u64) -> bool {
+        let mut guard = self.transaction.lock().unwrap();
+        let Some(state) = guard.as_ref() else {
+            return true; // workaround for Bug 1864526.
+        };
+        if state.tid != tid {
+            // Ignore the cancellation request if the transaction
+            // ID does not match.
+            return false;
+        }
+        // It's possible that we haven't dispatched the request to the usb_token_manager yet,
+        // e.g. if we're waiting for resume_make_credential. So reject the promise and drop the
+        // state here rather than from the StateCallback
+        let _ = state.promise.reject(NS_ERROR_DOM_NOT_ALLOWED_ERR);
+        *guard = None;
+        true
+    }
+
+    xpcom_method!(cancel => Cancel(aTransactionId: u64));
+    fn cancel(&self, tid: u64) -> Result<(), nsresult> {
+        self.clear_transaction(tid);
+        // TODO: Cancel dbus controller?
+        Ok(())
+    }
+
+    xpcom_method!(reset => Reset());
+    fn reset(&self) -> Result<(), nsresult> {
+        {
+            if let Some(state) = self.transaction.lock().unwrap().take() {
+                // cancel_prompts(state.tid)?;
+                state.promise.reject(NS_ERROR_DOM_ABORT_ERR)?;
+            }
+        } // release the transaction lock so a StateCallback can take it
+          // TODO!;
+          // self.usb_token_manager.lock().unwrap().cancel();
+        Ok(())
+    }
+
+    xpcom_method!(
+        add_virtual_authenticator => AddVirtualAuthenticator(
+            protocol: *const nsACString,
+            transport: *const nsACString,
+            has_resident_key: bool,
+            has_user_verification: bool,
+            is_user_consenting: bool,
+            is_user_verified: bool) -> nsACString
+    );
+    fn add_virtual_authenticator(
+        &self,
+        _protocol: &nsACString,
+        _transport: &nsACString,
+        _has_resident_key: bool,
+        _has_user_verification: bool,
+        _is_user_consenting: bool,
+        _is_user_verified: bool,
+    ) -> Result<nsCString, nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(remove_virtual_authenticator => RemoveVirtualAuthenticator(authenticatorId: *const nsACString));
+    fn remove_virtual_authenticator(&self, _authenticator_id: &nsACString) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(
+        add_credential => AddCredential(
+            authenticatorId: *const nsACString,
+            credential_id: *const nsACString,
+            is_resident_credential: bool,
+            rp_id: *const nsACString,
+            private_key: *const nsACString,
+            user_handle: *const nsACString,
+            sign_count: u32)
+    );
+    fn add_credential(
+        &self,
+        _authenticator_id: &nsACString,
+        _credential_id: &nsACString,
+        _is_resident_credential: bool,
+        _rp_id: &nsACString,
+        _private_key: &nsACString,
+        _user_handle: &nsACString,
+        _sign_count: u32,
+    ) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(get_credentials => GetCredentials(authenticatorId: *const nsACString) -> ThinVec<Option<RefPtr<nsICredentialParameters>>>);
+    fn get_credentials(
+        &self,
+        _authenticator_id: &nsACString,
+    ) -> Result<ThinVec<Option<RefPtr<nsICredentialParameters>>>, nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(remove_credential => RemoveCredential(authenticatorId: *const nsACString, credentialId: *const nsACString));
+    fn remove_credential(
+        &self,
+        _authenticator_id: &nsACString,
+        _credential_id: &nsACString,
+    ) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(remove_all_credentials => RemoveAllCredentials(authenticatorId: *const nsACString));
+    fn remove_all_credentials(&self, _authenticator_id: &nsACString) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(set_user_verified => SetUserVerified(authenticatorId: *const nsACString, isUserVerified: bool));
+    fn set_user_verified(
+        &self,
+        _authenticator_id: &nsACString,
+        _is_user_verified: bool,
+    ) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(listen => Listen());
+    pub(crate) fn listen(&self) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(run_command => RunCommand(c_cmd: *const nsACString));
+    pub fn run_command(&self, _c_cmd: &nsACString) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(pin_callback => PinCallback(aTransactionId: u64, aPin: *const nsACString));
+    fn pin_callback(&self, _transaction_id: u64, _pin: &nsACString) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+
+    xpcom_method!(selection_callback => SelectionCallback(aTransactionId: u64, aSelection: u64));
+    fn selection_callback(&self, _transaction_id: u64, _selection: u64) -> Result<(), nsresult> {
+        Err(NS_ERROR_NOT_IMPLEMENTED)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn xdg_portal_auth_service_if_available(
+    result: *mut *const nsIWebAuthnService,
+) -> nsresult {
+    let dbus_controller = match DbusController::new() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!(
+                "Failed to create DBUS connection. Assuming XDG portal is not available. {e:?}"
+            );
+            return NS_ERROR_NOT_AVAILABLE;
+        }
+    };
+
+    if !dbus_controller.is_service_active() {
+        log::warn!("Failed to find XDG portal.");
+        return NS_ERROR_NOT_AVAILABLE;
+    }
+
+    let wrapper = XdgPortalAuthService::allocate(InitXdgPortalAuthService {
+        dbus_controller: Mutex::new(dbus_controller),
+        transaction: Arc::new(Mutex::new(None)),
+    });
+
+    unsafe {
+        RefPtr::new(wrapper.coerce::<nsIWebAuthnService>()).forget(&mut *result);
+    }
+    NS_OK
+}

@@ -48,8 +48,14 @@ class WebAuthnService final : public nsIWebAuthnService {
     if (!mPlatformService) {
       mPlatformService = mAuthrsService;
     }
+#elif defined(XP_LINUX)
+    xdg_portal_auth_service_if_available(getter_AddRefs(mPlatformService));
+
+    if (!mPlatformService) {
+      mPlatformService = mAuthrsService;
+    }
 #else
-    mPlatformService = mAuthrsService;
+      mPlatformService = mAuthrsService;
 #endif
   }
 

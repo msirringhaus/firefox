@@ -126,6 +126,9 @@ webext-storage = "0.1"
 detect_win32k_conflicts = { path = "../../../xre/detect_win32k_conflicts" }
 widget_windows = { path = "../../../../widget/windows/rust" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+xdg_portal_auth_service = { path = "../../../../dom/webauthn/linux_xdg_portal_service" }
+
 [features]
 default = []
 moz_memory = ["mozglue-static/moz_memory"]
