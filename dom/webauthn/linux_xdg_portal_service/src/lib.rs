@@ -8,6 +8,7 @@ extern crate xpcom;
 use base64::Engine;
 use base64::{self, engine::general_purpose::URL_SAFE_NO_PAD};
 use dbus::arg::{RefArg, Variant};
+use moz_task::RunnableBuilder;
 use nserror::{
     nsresult, NS_ERROR_DOM_ABORT_ERR, NS_ERROR_DOM_NOT_ALLOWED_ERR, NS_ERROR_FAILURE,
     NS_ERROR_NOT_AVAILABLE, NS_ERROR_NOT_IMPLEMENTED, NS_OK,
@@ -68,7 +69,6 @@ struct TransactionState {
 // XdgPortalAuthService provides an nsIWebAuthnService built on top of authenticator-rs.
 #[xpcom(implement(nsIWebAuthnService), atomic)]
 pub struct XdgPortalAuthService {
-    dbus_controller: Mutex<DbusController>,
     transaction: Arc<Mutex<Option<TransactionState>>>,
 }
 
@@ -251,38 +251,6 @@ impl XdgPortalAuthService {
         })
         .to_string();
 
-        // We need to craft a message like this:
-        // req = {
-        //     "type": Variant('s', "publicKey"),
-        //     "origin": Variant('s', origin),
-        //     "is_same_origin": Variant('b', is_same_origin),
-        //     "publicKey": Variant('a{sv}', {
-        //         "request_json": Variant('s', req_json)
-        //     })
-        // }
-
-        // --- Build the inner dictionary for "publicKey" ---
-        // This corresponds to the a{sv} value of the "publicKey" key.
-        let mut public_key_dict = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
-        public_key_dict.insert("request_json".to_string(), Variant(Box::new(json_str)));
-
-        // --- Build the main dictionary payload ---
-        // This is the top-level a{sv} structure.
-        let mut req = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
-        req.insert(
-            "type".to_string(),
-            Variant(Box::new("publicKey".to_string())),
-        );
-        req.insert("origin".to_string(), Variant(Box::new(origin.to_string())));
-        req.insert(
-            "is_same_origin".to_string(),
-            Variant(Box::new(true)), // TODO!
-        );
-        req.insert(
-            "publicKey".to_string(),
-            // The inner dictionary must also be wrapped in a Variant
-            Variant(Box::new(public_key_dict)),
-        );
         let mut guard = self.transaction.lock().unwrap();
         *guard = Some(TransactionState {
             tid,
@@ -294,22 +262,68 @@ impl XdgPortalAuthService {
         // hairpins the state callback.
         drop(guard);
 
-        let dbus = self.dbus_controller.lock().unwrap();
-        let result = dbus.send_create_credential(req);
-        drop(dbus);
+        let callback_transaction = self.transaction.clone();
+        RunnableBuilder::new("XdgPortalService::MakeCredential::DbusSend", move || {
+            // We need to craft a message like this:
+            // req = {
+            //     "type": Variant('s', "publicKey"),
+            //     "origin": Variant('s', origin),
+            //     "is_same_origin": Variant('b', is_same_origin),
+            //     "publicKey": Variant('a{sv}', {
+            //         "request_json": Variant('s', req_json)
+            //     })
+            // }
+            //
+            // --- Build the inner dictionary for "publicKey" ---
+            // This corresponds to the a{sv} value of the "publicKey" key.
+            let mut public_key_dict = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
+            public_key_dict.insert("request_json".to_string(), Variant(Box::new(json_str)));
 
-        let mut guard = self.transaction.lock().unwrap();
-        let Some(state) = guard.as_mut() else {
-            return Err(NS_ERROR_FAILURE);
-        };
-        if state.tid != tid {
-            return Err(NS_ERROR_FAILURE);
-        }
-        let TransactionPromise::Register(ref promise) = state.promise else {
-            return Err(NS_ERROR_FAILURE);
-        };
-        let _ = promise.resolve_or_reject(result); // TODO: Do correct error mapping here
-        *guard = None;
+            // --- Build the main dictionary payload ---
+            // This is the top-level a{sv} structure.
+            let mut req = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
+            req.insert(
+                "type".to_string(),
+                Variant(Box::new("publicKey".to_string())),
+            );
+            req.insert("origin".to_string(), Variant(Box::new(origin.to_string())));
+            req.insert(
+                "is_same_origin".to_string(),
+                Variant(Box::new(true)), // TODO!
+            );
+            req.insert(
+                "publicKey".to_string(),
+                // The inner dictionary must also be wrapped in a Variant
+                Variant(Box::new(public_key_dict)),
+            );
+
+            // Create a new dbus connection and send the message
+            let dbus_controller = match DbusController::new() {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("Failed to create DBUS connection {e:?}");
+                    return;
+                }
+            };
+            let result = dbus_controller.send_create_credential(req);
+
+            let mut guard = callback_transaction.lock().unwrap();
+            let Some(state) = guard.as_mut() else {
+                return;
+            };
+            if state.tid != tid {
+                return;
+            }
+            let TransactionPromise::Register(ref promise) = state.promise else {
+                return;
+            };
+
+            let _ = promise.resolve_or_reject(result); // TODO: Do correct error mapping here
+            *guard = None;
+        })
+        .may_block(true)
+        .dispatch_background_task()?;
+
         Ok(())
     }
 
@@ -462,37 +476,6 @@ impl XdgPortalAuthService {
         })
         .to_string();
 
-        // We need to craft a message like this:
-        // req = {
-        //     "type": Variant('s', "publicKey"),
-        //     "origin": Variant('s', origin),
-        //     "is_same_origin": Variant('b', is_same_origin),
-        //     "publicKey": Variant('a{sv}', {
-        //         "request_json": Variant('s', req_json)
-        //     })
-        // }
-        // --- Build the inner dictionary for "publicKey" ---
-        // This corresponds to the a{sv} value of the "publicKey" key.
-        let mut public_key_dict = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
-        public_key_dict.insert("request_json".to_string(), Variant(Box::new(json_str)));
-
-        // --- Build the main dictionary payload ---
-        // This is the top-level a{sv} structure.
-        let mut req = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
-        req.insert(
-            "type".to_string(),
-            Variant(Box::new("publicKey".to_string())),
-        );
-        req.insert("origin".to_string(), Variant(Box::new(origin.to_string())));
-        req.insert(
-            "is_same_origin".to_string(),
-            Variant(Box::new(true)), // TODO!
-        );
-        req.insert(
-            "publicKey".to_string(),
-            // The inner dictionary must also be wrapped in a Variant
-            Variant(Box::new(public_key_dict)),
-        );
         let mut guard = self.transaction.lock().unwrap();
         *guard = Some(TransactionState {
             tid,
@@ -504,22 +487,65 @@ impl XdgPortalAuthService {
         // hairpins the state callback.
         drop(guard);
 
-        let dbus = self.dbus_controller.lock().unwrap();
-        let result = dbus.send_get_credential(req);
-        drop(dbus);
+        let callback_transaction = self.transaction.clone();
+        RunnableBuilder::new("XdgPortalService::GetCredential::DbusSend", move || {
+            // We need to craft a message like this:
+            // req = {
+            //     "type": Variant('s', "publicKey"),
+            //     "origin": Variant('s', origin),
+            //     "is_same_origin": Variant('b', is_same_origin),
+            //     "publicKey": Variant('a{sv}', {
+            //         "request_json": Variant('s', req_json)
+            //     })
+            // }
+            // --- Build the inner dictionary for "publicKey" ---
+            // This corresponds to the a{sv} value of the "publicKey" key.
+            let mut public_key_dict = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
+            public_key_dict.insert("request_json".to_string(), Variant(Box::new(json_str)));
 
-        let mut guard = self.transaction.lock().unwrap();
-        let Some(state) = guard.as_mut() else {
-            return Err(NS_ERROR_FAILURE);
-        };
-        if state.tid != tid {
-            return Err(NS_ERROR_FAILURE);
-        }
-        let TransactionPromise::Sign(ref promise) = state.promise else {
-            return Err(NS_ERROR_FAILURE);
-        };
-        let _ = promise.resolve_or_reject(result); // TODO: Do correct error mapping here
-        *guard = None;
+            // --- Build the main dictionary payload ---
+            // This is the top-level a{sv} structure.
+            let mut req = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
+            req.insert(
+                "type".to_string(),
+                Variant(Box::new("publicKey".to_string())),
+            );
+            req.insert("origin".to_string(), Variant(Box::new(origin.to_string())));
+            req.insert(
+                "is_same_origin".to_string(),
+                Variant(Box::new(true)), // TODO!
+            );
+            req.insert(
+                "publicKey".to_string(),
+                // The inner dictionary must also be wrapped in a Variant
+                Variant(Box::new(public_key_dict)),
+            );
+
+            // Create a new dbus connection and send the message
+            let dbus_controller = match DbusController::new() {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("Failed to create DBUS connection {e:?}");
+                    return;
+                }
+            };
+            let result = dbus_controller.send_get_credential(req);
+
+            let mut guard = callback_transaction.lock().unwrap();
+            let Some(state) = guard.as_mut() else {
+                return;
+            };
+            if state.tid != tid {
+                return;
+            }
+            let TransactionPromise::Sign(ref promise) = state.promise else {
+                return;
+            };
+            let _ = promise.resolve_or_reject(result); // TODO: Do correct error mapping here
+            *guard = None;
+        })
+        .may_block(true)
+        .dispatch_background_task()?;
         Ok(())
 
         // if !conditionally_mediated {
@@ -863,6 +889,8 @@ impl XdgPortalAuthService {
 pub extern "C" fn xdg_portal_auth_service_if_available(
     result: *mut *const nsIWebAuthnService,
 ) -> nsresult {
+    // This is not send-able to other threads because it contains a raw pointer,
+    // but we don't need to keep it. We can simply create a new one on the fly
     let dbus_controller = match DbusController::new() {
         Ok(c) => c,
         Err(e) => {
@@ -879,7 +907,6 @@ pub extern "C" fn xdg_portal_auth_service_if_available(
     }
 
     let wrapper = XdgPortalAuthService::allocate(InitXdgPortalAuthService {
-        dbus_controller: Mutex::new(dbus_controller),
         transaction: Arc::new(Mutex::new(None)),
     });
 

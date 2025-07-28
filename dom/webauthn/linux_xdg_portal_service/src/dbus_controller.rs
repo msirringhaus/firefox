@@ -1,4 +1,4 @@
-use super::NS_ERROR_FAILURE;
+use super::NS_ERROR_DOM_NOT_ALLOWED_ERR;
 use dbus::{
     arg::{IterAppend, RefArg, Variant},
     BusType, Connection, Error, Message,
@@ -72,11 +72,11 @@ impl DbusController {
             .send_message(Self::CREATE_CREDENTIAL_FUNCTION, msg)
             .map_err(|e| {
                 log::error!("Failed to send webauthn request via DBUS: {e:?}");
-                NS_ERROR_FAILURE
+                NS_ERROR_DOM_NOT_ALLOWED_ERR
             })?;
         RegisterResult::parse_from_dbus(resp).map_err(|e| {
             log::error!("Failed parse webauthn reply from XDG portal: {e:?}");
-            NS_ERROR_FAILURE
+            NS_ERROR_DOM_NOT_ALLOWED_ERR
         })
     }
 
@@ -88,11 +88,11 @@ impl DbusController {
             .send_message(Self::GET_CREDENTIAL_FUNCTION, msg)
             .map_err(|e| {
                 log::error!("Failed to send webauthn request via DBUS: {e:?}");
-                NS_ERROR_FAILURE
+                NS_ERROR_DOM_NOT_ALLOWED_ERR
             })?;
         SignResult::parse_from_dbus(resp).map_err(|e| {
             log::error!("Failed parse webauthn reply from XDG portal: {e:?}");
-            NS_ERROR_FAILURE
+            NS_ERROR_DOM_NOT_ALLOWED_ERR
         })
     }
 }
