@@ -16739,6 +16739,15 @@
   mirror: always
   rust: true
 
+#if defined(MOZ_WIDGET_GTK)
+# Dispatch WebAuthn requests to linux xdg portal
+- name: security.webauth.webauthn_enable_xdg_portal
+  type: RelaxedAtomicBool
+  value: true
+  mirror: always
+  rust: true
+#endif
+
 # residentKey support when using Android platform API
 - name: security.webauthn.webauthn_enable_android_fido2.residentkey
   type: RelaxedAtomicBool

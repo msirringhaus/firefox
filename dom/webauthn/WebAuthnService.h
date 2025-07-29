@@ -48,8 +48,11 @@ class WebAuthnService final : public nsIWebAuthnService {
     if (!mPlatformService) {
       mPlatformService = mAuthrsService;
     }
-#elif defined(XP_LINUX)
-    xdg_portal_auth_service_if_available(getter_AddRefs(mPlatformService));
+#elif defined(MOZ_WIDGET_GTK)
+
+    if (StaticPrefs::security_webauth_webauthn_enable_xdg_portal()) {
+      xdg_portal_auth_service_if_available(getter_AddRefs(mPlatformService));
+    }
 
     if (!mPlatformService) {
       mPlatformService = mAuthrsService;
@@ -78,7 +81,7 @@ class WebAuthnService final : public nsIWebAuthnService {
   void ResetLocked(const TransactionStateMutex::AutoLock& aGuard);
 
   nsIWebAuthnService* DefaultService() {
-    if (StaticPrefs::security_webauth_webauthn_enable_softtoken()) {
+    if (StaticPrefs::security_webauth_webauthn_enable_softtoken() && !StaticPrefs::security_webauth_webauthn_enable_xdg_portal()) {
       return mAuthrsService;
     }
     return mPlatformService;
