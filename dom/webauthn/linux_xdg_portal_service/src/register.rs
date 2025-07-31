@@ -12,15 +12,15 @@ use thin_vec::ThinVec;
 use xpcom::interfaces::{nsIWebAuthnRegisterPromise, nsIWebAuthnRegisterResult};
 use xpcom::{xpcom_method, RefPtr};
 
-// #[derive(Debug, Clone)]
-// pub(crate) struct RegisterExtensionsResult {
-//     pub(crate) hmac_create_secret: Option<bool>,
-//     pub(crate) large_blob_supported: Option<bool>,
-//     pub(crate) prf_enabled: Option<bool>,
-//     pub(crate) prf_results_first: Option<Vec<u8>>,
-//     pub(crate) prf_results_second: Option<Vec<u8>>,
-//     pub(crate) cred_props_rk: Option<bool>,
-// }
+#[derive(Debug, Clone)]
+pub(crate) struct RegisterExtensionsResult {
+    pub(crate) hmac_create_secret: Option<bool>,
+    pub(crate) large_blob_supported: Option<bool>,
+    pub(crate) prf_enabled: Option<bool>,
+    pub(crate) prf_results_first: Option<Vec<u8>>,
+    pub(crate) prf_results_second: Option<Vec<u8>>,
+    pub(crate) cred_props_rk: Option<bool>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RegisterResult {
@@ -28,7 +28,7 @@ pub(crate) struct RegisterResult {
     pub(crate) transports: Option<Vec<String>>,
     pub(crate) attestation_object: Option<Vec<u8>>,
     pub(crate) credential_id: Option<Vec<u8>>,
-    // pub(crate) extensions: Option<RegisterExtensionsResult>,
+    pub(crate) extensions: Option<RegisterExtensionsResult>,
     pub(crate) authenticator_attachment: Option<String>,
 }
 
@@ -96,13 +96,21 @@ impl RegisterResult {
             .as_str()
             .map(String::from);
 
-        // let extensions = response_json["clientExtensionResults"]
-        //     .as_str()
-        //     .map(|extensions| {
-        //         let _extensions_json: serde_json::Value = serde_json::from_str(extensions)?;
-        //         // TODO
-        //         None
-        //     });
+        let extensions =
+            if let Some(extensions) = response_json["clientExtensionResults"].as_object() {
+                let hmac_create_secret = extensions["hmac_create_secret"].as_bool();
+                // TODO
+                Some(RegisterExtensionsResult {
+                    hmac_create_secret,
+                    large_blob_supported: None,
+                    prf_enabled: None,
+                    prf_results_first: None,
+                    prf_results_second: None,
+                    cred_props_rk: None,
+                })
+            } else {
+                None
+            };
 
         let attestation_object = response_json["response"]["attestationObject"]
             .as_str()
@@ -130,7 +138,7 @@ impl RegisterResult {
             transports,
             attestation_object,
             credential_id,
-            // extensions,
+            extensions,
             authenticator_attachment,
         })
     }
@@ -205,65 +213,84 @@ impl WebAuthnRegisterResult {
 
     xpcom_method!(get_hmac_create_secret => GetHmacCreateSecret() -> bool);
     fn get_hmac_create_secret(&self) -> Result<bool, nsresult> {
-        // let Some(hmac_create_secret) = self.result.borrow().extensions.hmac_create_secret else {
-        //     return Err(NS_ERROR_NOT_AVAILABLE);
-        // };
-        // Ok(hmac_create_secret)
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(hmac_create_secret) = self
+            .result
+            .borrow()
+            .extensions
+            .as_ref()
+            .and_then(|e| e.hmac_create_secret)
+        else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+        Ok(hmac_create_secret)
     }
 
     xpcom_method!(get_large_blob_supported => GetLargeBlobSupported() -> bool);
     fn get_large_blob_supported(&self) -> Result<bool, nsresult> {
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(large_blob_supported) = self
+            .result
+            .borrow()
+            .extensions
+            .as_ref()
+            .and_then(|e| e.large_blob_supported)
+        else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+        Ok(large_blob_supported)
     }
 
     xpcom_method!(get_prf_enabled => GetPrfEnabled() -> bool);
     fn get_prf_enabled(&self) -> Result<bool, nsresult> {
-        Err(NS_ERROR_NOT_AVAILABLE)
-        // match self.result.borrow().extensions.prf {
-        //     Some(AuthenticationExtensionsPRFOutputs {
-        //         enabled: Some(prf_enabled),
-        //         ..
-        //     }) => Ok(prf_enabled),
-        //     _ => Err(NS_ERROR_NOT_AVAILABLE),
-        // }
+        let Some(prf_enabled) = self
+            .result
+            .borrow()
+            .extensions
+            .as_ref()
+            .and_then(|e| e.prf_enabled)
+        else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+        Ok(prf_enabled)
     }
 
     xpcom_method!(get_prf_results_first => GetPrfResultsFirst() -> ThinVec<u8>);
     fn get_prf_results_first(&self) -> Result<ThinVec<u8>, nsresult> {
-        // match &self.result.borrow().extensions.prf {
-        //     Some(AuthenticationExtensionsPRFOutputs {
-        //         results: Some(AuthenticationExtensionsPRFValues { first, .. }),
-        //         ..
-        //     }) => Ok(first.as_slice().into()),
-        //     _ => Err(NS_ERROR_NOT_AVAILABLE),
-        // }
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(extensions) = &self.result.borrow().extensions else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        let Some(prf_results_first) = &extensions.prf_results_first else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        Ok(prf_results_first.as_slice().into())
     }
 
     xpcom_method!(get_prf_results_second => GetPrfResultsSecond() -> ThinVec<u8>);
     fn get_prf_results_second(&self) -> Result<ThinVec<u8>, nsresult> {
-        // match &self.result.borrow().extensions.prf {
-        //     Some(AuthenticationExtensionsPRFOutputs {
-        //         results:
-        //             Some(AuthenticationExtensionsPRFValues {
-        //                 second: Some(second),
-        //                 ..
-        //             }),
-        //         ..
-        //     }) => Ok(second.as_slice().into()),
-        //     _ => Err(NS_ERROR_NOT_AVAILABLE),
-        // }
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(extensions) = &self.result.borrow().extensions else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        let Some(prf_results_second) = &extensions.prf_results_second else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        Ok(prf_results_second.as_slice().into())
     }
 
     xpcom_method!(get_cred_props_rk => GetCredPropsRk() -> bool);
     fn get_cred_props_rk(&self) -> Result<bool, nsresult> {
-        // let Some(cred_props) = &self.result.borrow().extensions.cred_props else {
-        //     return Err(NS_ERROR_NOT_AVAILABLE);
-        // };
-        // Ok(cred_props.rk)
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(cred_props_rk) = self
+            .result
+            .borrow()
+            .extensions
+            .as_ref()
+            .and_then(|e| e.cred_props_rk)
+        else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+        Ok(cred_props_rk)
     }
 
     xpcom_method!(set_cred_props_rk => SetCredPropsRk(aCredPropsRk: bool));

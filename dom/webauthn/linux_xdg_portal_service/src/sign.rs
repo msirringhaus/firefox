@@ -34,17 +34,17 @@ pub(crate) struct SignResult {
     pub(crate) authenticator_data: Option<Vec<u8>>,
     pub(crate) signature: Option<Vec<u8>>,
     pub(crate) user_handle: Option<Vec<u8>>,
-    // pub(crate) extensions: Option<SignExtensionsResult>,
+    pub(crate) extensions: Option<SignExtensionsResult>,
 }
 
-// #[derive(Debug, Clone)]
-// pub(crate) struct SignExtensionsResult {
-//     pub(crate) large_blob_value: Option<Vec<u8>>,
-//     pub(crate) large_blob_written: Option<bool>,
-//     pub(crate) prf_maybe: Option<bool>,
-//     pub(crate) prf_results_first: Option<Vec<u8>>,
-//     pub(crate) prf_results_second: Option<Vec<u8>>,
-// }
+#[derive(Debug, Clone)]
+pub(crate) struct SignExtensionsResult {
+    pub(crate) large_blob_value: Option<Vec<u8>>,
+    pub(crate) large_blob_written: Option<bool>,
+    pub(crate) prf_maybe: Option<bool>,
+    pub(crate) prf_results_first: Option<Vec<u8>>,
+    pub(crate) prf_results_second: Option<Vec<u8>>,
+}
 
 impl SignResult {
     pub(crate) fn parse_from_dbus(reply: Message) -> Result<Self, Box<dyn std::error::Error>> {
@@ -110,13 +110,19 @@ impl SignResult {
             .as_str()
             .map(String::from);
 
-        // let extensions = response_json["clientExtensionResults"]
-        //     .as_str()
-        //     .map(|extensions| {
-        //         let _extensions_json: serde_json::Value = serde_json::from_str(extensions)?;
-        //         // TODO
-        //         None
-        //     });
+        let extensions =
+            if let Some(extensions) = response_json["clientExtensionResults"].as_object() {
+                // TODO
+                Some(SignExtensionsResult {
+                    large_blob_value: None,
+                    large_blob_written: None,
+                    prf_maybe: None,
+                    prf_results_first: None,
+                    prf_results_second: None,
+                })
+            } else {
+                None
+            };
 
         let client_data_json = response_json["response"]["clientDataJSON"]
             .as_str()
@@ -143,7 +149,7 @@ impl SignResult {
         Ok(Self {
             client_data_json,
             credential_id,
-            // extensions,
+            extensions,
             authenticator_attachment,
             authenticator_data,
             signature,
@@ -232,47 +238,70 @@ impl WebAuthnSignResult {
 
     xpcom_method!(get_large_blob_value => GetLargeBlobValue() -> ThinVec<u8>);
     fn get_large_blob_value(&self) -> Result<ThinVec<u8>, nsresult> {
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(extensions) = &self.result.extensions else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        let Some(large_blob_value) = &extensions.large_blob_value else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        Ok(large_blob_value.as_slice().into())
     }
 
     xpcom_method!(get_large_blob_written => GetLargeBlobWritten() -> bool);
     fn get_large_blob_written(&self) -> Result<bool, nsresult> {
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(large_blob_written) = self
+            .result
+            .extensions
+            .as_ref()
+            .map(|e| e.large_blob_written)
+            .flatten()
+        else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+        Ok(large_blob_written)
     }
 
     xpcom_method!(get_prf_maybe => GetPrfMaybe() -> bool);
     /// Return true if a PRF output is present, even if all attributes are absent.
     fn get_prf_maybe(&self) -> Result<bool, nsresult> {
-        // Ok(self.result.extensions.prf.is_some())
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(prf_maybe) = self
+            .result
+            .extensions
+            .as_ref()
+            .map(|e| e.prf_maybe)
+            .flatten()
+        else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+        Ok(prf_maybe)
     }
 
     xpcom_method!(get_prf_results_first => GetPrfResultsFirst() -> ThinVec<u8>);
     fn get_prf_results_first(&self) -> Result<ThinVec<u8>, nsresult> {
-        // match &self.result.extensions.prf {
-        //     Some(AuthenticationExtensionsPRFOutputs {
-        //         results: Some(AuthenticationExtensionsPRFValues { first, .. }),
-        //         ..
-        //     }) => Ok(first.as_slice().into()),
-        //     _ => Err(NS_ERROR_NOT_AVAILABLE),
-        // }
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(extensions) = &self.result.extensions else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        let Some(prf_results_first) = &extensions.prf_results_first else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        Ok(prf_results_first.as_slice().into())
     }
 
     xpcom_method!(get_prf_results_second => GetPrfResultsSecond() -> ThinVec<u8>);
     fn get_prf_results_second(&self) -> Result<ThinVec<u8>, nsresult> {
-        // match &self.result.extensions.prf {
-        //     Some(AuthenticationExtensionsPRFOutputs {
-        //         results:
-        //             Some(AuthenticationExtensionsPRFValues {
-        //                 second: Some(second),
-        //                 ..
-        //             }),
-        //         ..
-        //     }) => Ok(second.as_slice().into()),
-        //     _ => Err(NS_ERROR_NOT_AVAILABLE),
-        // }
-        Err(NS_ERROR_NOT_AVAILABLE)
+        let Some(extensions) = &self.result.extensions else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        let Some(prf_results_second) = &extensions.prf_results_second else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+
+        Ok(prf_results_second.as_slice().into())
     }
 }
 

@@ -75,14 +75,8 @@ pub struct XdgPortalAuthService {
 impl XdgPortalAuthService {
     xpcom_method!(get_is_uvpaa => GetIsUVPAA() -> bool);
     fn get_is_uvpaa(&self) -> Result<bool, nsresult> {
-        todo!();
-        // if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
-        //     Ok(false)
-        // } else if static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
-        //     Ok(self.test_token_manager.has_platform_authenticator())
-        // } else {
-        //     Err(NS_ERROR_NOT_AVAILABLE)
-        // }
+        // For now, xdg-portal doesn't offer a platform authenticator
+        Ok(false)
     }
 
     xpcom_method!(make_credential => MakeCredential(aTid: u64, aBrowsingContextId: u64, aArgs: *const nsIWebAuthnRegisterArgs, aPromise: *const nsIWebAuthnRegisterPromise));
@@ -157,82 +151,85 @@ impl XdgPortalAuthService {
         let mut user_verification = nsString::new();
         unsafe { args.GetUserVerification(&mut *user_verification) }.to_result()?;
 
-        // let mut authenticator_attachment = nsString::new();
-        // if unsafe { args.GetAuthenticatorAttachment(&mut *authenticator_attachment) }
-        //     .to_result()
-        //     .is_ok()
-        // {
-        //     if authenticator_attachment.eq("platform") {
-        //         return Err(NS_ERROR_FAILURE);
-        //     }
-        // }
+        let mut authenticator_attachment = nsString::new();
+        if unsafe { args.GetAuthenticatorAttachment(&mut *authenticator_attachment) }
+            .to_result()
+            .is_ok()
+        {
+            // For now, xdg-portal doesn't offer a platform authenticator
+            if authenticator_attachment.eq("platform") {
+                return Err(NS_ERROR_NOT_AVAILABLE);
+            }
+        }
 
-        // let mut credential_protection_policy = None;
-        // let mut enforce_credential_protection_policy = None;
-        // let mut cred_protect_policy_value = nsCString::new();
-        // let mut enforce_cred_protect_value = false;
-        // if unsafe { args.GetCredentialProtectionPolicy(&mut *cred_protect_policy_value) }
-        //     .to_result()
-        //     .is_ok()
-        // {
-        //     unsafe { args.GetEnforceCredentialProtectionPolicy(&mut enforce_cred_protect_value) }
-        //         .to_result()?;
-        //     credential_protection_policy = if cred_protect_policy_value
-        //         .eq("userVerificationOptional")
-        //     {
-        //         Some(CredentialProtectionPolicy::UserVerificationOptional)
-        //     } else if cred_protect_policy_value.eq("userVerificationOptionalWithCredentialIDList") {
-        //         Some(CredentialProtectionPolicy::UserVerificationOptionalWithCredentialIDList)
-        //     } else if cred_protect_policy_value.eq("userVerificationRequired") {
-        //         Some(CredentialProtectionPolicy::UserVerificationRequired)
-        //     } else {
-        //         return Err(NS_ERROR_FAILURE);
-        //     };
-        //     enforce_credential_protection_policy = Some(enforce_cred_protect_value);
-        // }
+        let mut extensions = serde_json::Map::new();
+        let mut cred_protect_policy_value = nsCString::new();
+        if unsafe { args.GetCredentialProtectionPolicy(&mut *cred_protect_policy_value) }
+            .to_result()
+            .is_ok()
+        {
+            extensions.insert(
+                "credentialProtectionPolicy".to_string(),
+                json!(cred_protect_policy_value.to_string()),
+            );
+            let mut enforce_cred_protect_value = false;
+            unsafe { args.GetEnforceCredentialProtectionPolicy(&mut enforce_cred_protect_value) }
+                .to_result()?;
+            extensions.insert(
+                "enforceCredentialProtectionPolicy".to_string(),
+                json!(enforce_cred_protect_value),
+            );
+        }
 
-        // let mut cred_props = false;
-        // unsafe { args.GetCredProps(&mut cred_props) }.to_result()?;
+        // Not yet supported by Firefox. See bmo#1844448
+        // let mut cred_blob = false;
+        // unsafe { args.GetCredBlob(&mut cred_blob) }.to_result()?;
 
-        // let mut min_pin_length = false;
-        // unsafe { args.GetMinPinLength(&mut min_pin_length) }.to_result()?;
+        let mut cred_props = false;
+        unsafe { args.GetCredProps(&mut cred_props) }.to_result()?;
+        if cred_props {
+            extensions.insert("credProps".to_string(), json!(cred_props));
+        }
 
-        // let prf_input = (|| -> Option<AuthenticationExtensionsPRFInputs> {
-        //     let mut prf: bool = false;
-        //     unsafe { args.GetPrf(&mut prf) }.to_result().ok()?;
-        //     if !prf {
-        //         return None;
-        //     }
+        let mut min_pin_length = false;
+        unsafe { args.GetMinPinLength(&mut min_pin_length) }.to_result()?;
+        if min_pin_length {
+            extensions.insert("minPinLength".to_string(), json!(min_pin_length));
+        }
 
-        //     let eval = || -> Option<AuthenticationExtensionsPRFValues> {
-        //         let mut prf_eval_first: ThinVec<u8> = ThinVec::new();
-        //         let mut prf_eval_second: ThinVec<u8> = ThinVec::new();
-        //         unsafe { args.GetPrfEvalFirst(&mut prf_eval_first) }
-        //             .to_result()
-        //             .ok()?;
-        //         let has_second = unsafe { args.GetPrfEvalSecond(&mut prf_eval_second) }
-        //             .to_result()
-        //             .is_ok();
-        //         Some(AuthenticationExtensionsPRFValues {
-        //             first: prf_eval_first.to_vec(),
-        //             second: has_second.then(|| prf_eval_second.to_vec()),
-        //         })
-        //     }();
+        let mut prf = false;
+        if unsafe { args.GetPrf(&mut prf) }.to_result().is_ok() {
+            let mut prf_map = serde_json::Map::new();
+            let mut prf_eval_first: ThinVec<u8> = ThinVec::new();
+            unsafe { args.GetPrfEvalFirst(&mut prf_eval_first) }.to_result()?;
+            prf_map.insert(
+                "first".to_string(),
+                json!(URL_SAFE_NO_PAD.encode(prf_eval_first)),
+            );
 
-        //     Some(AuthenticationExtensionsPRFInputs {
-        //         eval,
-        //         eval_by_credential: None,
-        //     })
-        // })();
+            let mut prf_eval_second: ThinVec<u8> = ThinVec::new();
+            if unsafe { args.GetPrfEvalSecond(&mut prf_eval_second) }
+                .to_result()
+                .is_ok()
+            {
+                prf_map.insert(
+                    "second".to_string(),
+                    json!(URL_SAFE_NO_PAD.encode(prf_eval_second)),
+                );
+            }
+            extensions.insert("prf".to_string(), json!(prf_map));
+        }
 
-        // let mut hmac_create_secret = None;
-        // let mut maybe_hmac_create_secret = false;
-        // if unsafe { args.GetHmacCreateSecret(&mut maybe_hmac_create_secret) }
-        //     .to_result()
-        //     .is_ok()
-        // {
-        //     hmac_create_secret = Some(maybe_hmac_create_secret);
-        // }
+        let mut maybe_hmac_create_secret = false;
+        if unsafe { args.GetHmacCreateSecret(&mut maybe_hmac_create_secret) }
+            .to_result()
+            .is_ok()
+        {
+            extensions.insert(
+                "hmacCreateSecret".to_string(),
+                json!(maybe_hmac_create_secret),
+            );
+        }
 
         let json_str = json!({
             "challenge": challenge_str,
@@ -248,6 +245,7 @@ impl XdgPortalAuthService {
             "timeout": timeout_ms,
             "excludeCredentials": exclude_list,
             "pubKeyCredParams": pub_key_cred_params,
+            "extensions": extensions,
         })
         .to_string();
 
@@ -383,84 +381,86 @@ impl XdgPortalAuthService {
         //     _ => (),
         // }
 
-        // let prf_input = || -> Option<AuthenticationExtensionsPRFInputs> {
-        //     let mut prf: bool = false;
-        //     unsafe { args.GetPrf(&mut prf) }.to_result().ok()?;
-        //     if !prf {
-        //         return None;
-        //     }
+        let mut extensions = serde_json::Map::new();
 
-        //     let eval = || -> Option<AuthenticationExtensionsPRFValues> {
-        //         let mut prf_eval_first: ThinVec<u8> = ThinVec::new();
-        //         let mut prf_eval_second: ThinVec<u8> = ThinVec::new();
-        //         unsafe { args.GetPrfEvalFirst(&mut prf_eval_first) }
-        //             .to_result()
-        //             .ok()?;
-        //         let has_second = unsafe { args.GetPrfEvalSecond(&mut prf_eval_second) }
-        //             .to_result()
-        //             .is_ok();
-        //         Some(AuthenticationExtensionsPRFValues {
-        //             first: prf_eval_first.to_vec(),
-        //             second: has_second.then(|| prf_eval_second.to_vec()),
-        //         })
-        //     }();
+        let mut prf = false;
+        if unsafe { args.GetPrf(&mut prf) }.to_result().is_ok() {
+            let mut prf_map = serde_json::Map::new();
+            let mut prf_eval_map = serde_json::Map::new();
+            let mut prf_eval_first: ThinVec<u8> = ThinVec::new();
+            unsafe { args.GetPrfEvalFirst(&mut prf_eval_first) }.to_result()?;
+            prf_eval_map.insert(
+                "first".to_string(),
+                json!(URL_SAFE_NO_PAD.encode(prf_eval_first)),
+            );
 
-        //     let eval_by_credential =
-        //         || -> Option<HashMap<Vec<u8>, AuthenticationExtensionsPRFValues>> {
-        //             let mut credential_ids: ThinVec<ThinVec<u8>> = ThinVec::new();
-        //             let mut eval_by_cred_firsts: ThinVec<ThinVec<u8>> = ThinVec::new();
-        //             let mut eval_by_cred_second_maybes: ThinVec<bool> = ThinVec::new();
-        //             let mut eval_by_cred_seconds: ThinVec<ThinVec<u8>> = ThinVec::new();
-        //             unsafe { args.GetPrfEvalByCredentialCredentialId(&mut credential_ids) }
-        //                 .to_result()
-        //                 .ok()?;
-        //             unsafe { args.GetPrfEvalByCredentialEvalFirst(&mut eval_by_cred_firsts) }
-        //                 .to_result()
-        //                 .ok()?;
-        //             unsafe {
-        //                 args.GetPrfEvalByCredentialEvalSecondMaybe(&mut eval_by_cred_second_maybes)
-        //             }
-        //             .to_result()
-        //             .ok()?;
-        //             unsafe { args.GetPrfEvalByCredentialEvalSecond(&mut eval_by_cred_seconds) }
-        //                 .to_result()
-        //                 .ok()?;
-        //             if credential_ids.len() != eval_by_cred_firsts.len()
-        //                 || credential_ids.len() != eval_by_cred_second_maybes.len()
-        //                 || credential_ids.len() != eval_by_cred_seconds.len()
-        //             {
-        //                 return None;
-        //             }
-        //             let mut result = HashMap::new();
-        //             for i in 0..credential_ids.len() {
-        //                 result.insert(
-        //                     credential_ids[i].to_vec(),
-        //                     AuthenticationExtensionsPRFValues {
-        //                         first: eval_by_cred_firsts[i].to_vec(),
-        //                         second: eval_by_cred_second_maybes[i]
-        //                             .then(|| eval_by_cred_seconds[i].to_vec()),
-        //                     },
-        //                 );
-        //             }
-        //             Some(result)
-        //         }();
+            let mut prf_eval_second: ThinVec<u8> = ThinVec::new();
+            if unsafe { args.GetPrfEvalSecond(&mut prf_eval_second) }
+                .to_result()
+                .is_ok()
+            {
+                prf_eval_map.insert(
+                    "second".to_string(),
+                    json!(URL_SAFE_NO_PAD.encode(prf_eval_second)),
+                );
+            }
+            prf_map.insert("eval".to_string(), json!(prf_eval_map));
 
-        //     Some(AuthenticationExtensionsPRFInputs {
-        //         eval,
-        //         eval_by_credential,
-        //     })
-        // }();
+            let mut prf_eval_by_creds = serde_json::Map::new();
+            let mut credential_ids: ThinVec<ThinVec<u8>> = ThinVec::new();
+            let mut eval_by_cred_firsts: ThinVec<ThinVec<u8>> = ThinVec::new();
+            let mut eval_by_cred_second_maybes: ThinVec<bool> = ThinVec::new();
+            let mut eval_by_cred_seconds: ThinVec<ThinVec<u8>> = ThinVec::new();
+            if unsafe { args.GetPrfEvalByCredentialCredentialId(&mut credential_ids) }
+                .to_result()
+                .is_ok()
+                && !credential_ids.is_empty()
+            {
+                // All three functions are guaranteed to return arrays of the same length.
+                // If seconds are missing (because they are optional), then
+                // eval_by_cred_second_maybes[i] will have `false`, and eval_by_cred_seconds[i]
+                // an empty array
+                unsafe { args.GetPrfEvalByCredentialEvalFirst(&mut eval_by_cred_firsts) }
+                    .to_result()?;
+                unsafe {
+                    args.GetPrfEvalByCredentialEvalSecondMaybe(&mut eval_by_cred_second_maybes)
+                }
+                .to_result()?;
+                unsafe { args.GetPrfEvalByCredentialEvalSecond(&mut eval_by_cred_seconds) }
+                    .to_result()?;
 
-        // // https://w3c.github.io/webauthn/#prf-extension
-        // // "The hmac-secret extension provides two PRFs per credential: one which is used for
-        // // requests where user verification is performed and another for all other requests.
-        // // This extension [PRF] only exposes a single PRF per credential and, when implementing
-        // // on top of hmac-secret, that PRF MUST be the one used for when user verification is
-        // // performed. This overrides the UserVerificationRequirement if neccessary."
-        // if prf_input.is_some() && user_verification_req == UserVerificationRequirement::Discouraged
-        // {
-        //     user_verification_req = UserVerificationRequirement::Preferred;
-        // }
+                for i in 0..credential_ids.len() {
+                    let mut prf_eval_by_cred_map = serde_json::Map::new();
+                    prf_eval_by_cred_map.insert(
+                        "first".to_string(),
+                        json!(URL_SAFE_NO_PAD.encode(&eval_by_cred_firsts[i])),
+                    );
+
+                    if eval_by_cred_second_maybes[i] {
+                        prf_eval_by_cred_map.insert(
+                            "second".to_string(),
+                            json!(URL_SAFE_NO_PAD.encode(&eval_by_cred_seconds[i])),
+                        );
+                    }
+                    prf_eval_by_creds.insert(
+                        URL_SAFE_NO_PAD.encode(&credential_ids[i]),
+                        json!(prf_eval_by_cred_map),
+                    );
+                }
+                prf_map.insert("evalByCredential".to_string(), json!(prf_eval_by_creds));
+            }
+            extensions.insert("prf".to_string(), json!(prf_map));
+        }
+
+        // https://w3c.github.io/webauthn/#prf-extension
+        // "The hmac-secret extension provides two PRFs per credential: one which is used for
+        // requests where user verification is performed and another for all other requests.
+        // This extension [PRF] only exposes a single PRF per credential and, when implementing
+        // on top of hmac-secret, that PRF MUST be the one used for when user verification is
+        // performed. This overrides the UserVerificationRequirement if neccessary."
+        if prf && user_verification == "discouraged" {
+            user_verification = "preferred".into();
+        }
 
         // let mut conditionally_mediated = false;
         // unsafe { args.GetConditionallyMediated(&mut conditionally_mediated) }.to_result()?;
@@ -472,7 +472,7 @@ impl XdgPortalAuthService {
             "allowCredentials": allow_list,
             "userVerification": user_verification.to_string(),
             // "hints": [],
-            // "extensions": "",
+            "extensions": extensions,
         })
         .to_string();
 
