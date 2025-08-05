@@ -98,10 +98,10 @@ impl RegisterResult {
 
         let extensions =
             if let Some(extensions) = response_json["clientExtensionResults"].as_object() {
-                let hmac_create_secret = extensions["hmac_create_secret"].as_bool();
+                // let hmac_create_secret = extensions["hmac_create_secret"].as_bool();
                 // TODO
                 Some(RegisterExtensionsResult {
-                    hmac_create_secret,
+                    hmac_create_secret: None,
                     large_blob_supported: None,
                     prf_enabled: None,
                     prf_results_first: None,

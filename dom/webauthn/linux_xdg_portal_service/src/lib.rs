@@ -198,7 +198,7 @@ impl XdgPortalAuthService {
         }
 
         let mut prf = false;
-        if unsafe { args.GetPrf(&mut prf) }.to_result().is_ok() {
+        if unsafe { args.GetPrf(&mut prf) }.to_result().is_ok() && prf {
             let mut prf_map = serde_json::Map::new();
             let mut prf_eval_first: ThinVec<u8> = ThinVec::new();
             unsafe { args.GetPrfEvalFirst(&mut prf_eval_first) }.to_result()?;
@@ -246,6 +246,10 @@ impl XdgPortalAuthService {
             "excludeCredentials": exclude_list,
             "pubKeyCredParams": pub_key_cred_params,
             "extensions": extensions,
+            "authenticatorSelection": {
+                "residentKey": resident_key.to_string(),
+                "userVerification": user_verification.to_string(),
+            },
         })
         .to_string();
 
