@@ -6,6 +6,7 @@ use nserror::{
     nsresult, NS_ERROR_FAILURE, NS_ERROR_NOT_AVAILABLE, NS_ERROR_NOT_IMPLEMENTED, NS_OK,
 };
 use nsstring::{nsACString, nsAString, nsCString, nsString};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use thin_vec::ThinVec;
 use xpcom::interfaces::{nsIWebAuthnSignPromise, nsIWebAuthnSignResult};
@@ -303,6 +304,22 @@ impl WebAuthnSignResult {
 
         Ok(prf_results_second.as_slice().into())
     }
+}
+
+// Used for conditional mediation:
+// The webpage runs a get_assertion()-request, but adds mediation: 'conditional' to it.
+// If this is the case, we cache the incoming request and execute it at a later point
+// in time, when the user selects it, after clicking into the input-field.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingSignArgs {
+    pub(crate) origin: String,
+    /// base64 encoded challenge
+    pub(crate) challenge_str: String,
+    pub(crate) timeout_ms: u32,
+    pub(crate) rp_id: String,
+    pub(crate) allow_credential_ids: Vec<Vec<u8>>,
+    pub(crate) user_verification: String,
+    pub(crate) extensions: Map<String, Value>,
 }
 
 #[derive(Clone)]

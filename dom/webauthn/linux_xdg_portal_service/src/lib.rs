@@ -28,7 +28,7 @@ use register::RegisterPromise;
 pub use register::WebAuthnRegisterResult;
 
 mod sign;
-use sign::SignPromise;
+use sign::{PendingSignArgs, SignPromise};
 
 mod dbus_controller;
 use dbus_controller::DbusController;
@@ -62,7 +62,7 @@ impl TransactionPromise {
 struct TransactionState {
     tid: u64,
     browsing_context_id: u64,
-    // pending_args: Option<TransactionArgs>,
+    pending_args: Option<PendingSignArgs>,
     promise: TransactionPromise,
 }
 
@@ -253,7 +253,7 @@ impl XdgPortalAuthService {
         *guard = Some(TransactionState {
             tid,
             browsing_context_id,
-            // pending_args: None,
+            pending_args: None,
             promise: TransactionPromise::Register(promise),
         });
         // drop the guard here to ensure we don't deadlock if the call to `register()` below
@@ -361,15 +361,7 @@ impl XdgPortalAuthService {
 
         let mut allow_list_ids = ThinVec::new();
         unsafe { args.GetAllowList(&mut allow_list_ids) }.to_result()?;
-        let allow_list: Vec<_> = allow_list_ids
-            .iter()
-            .map(|id| {
-                json!({
-                    "id": URL_SAFE_NO_PAD.encode(&id),
-                    "type": "public-key",
-                })
-            })
-            .collect();
+        let allow_list: Vec<_> = allow_list_ids.iter().map(|id| id.to_vec()).collect();
 
         let mut user_verification = nsString::new();
         unsafe { args.GetUserVerification(&mut *user_verification) }.to_result()?;
@@ -384,7 +376,7 @@ impl XdgPortalAuthService {
         let mut extensions = serde_json::Map::new();
 
         let mut prf = false;
-        if unsafe { args.GetPrf(&mut prf) }.to_result().is_ok() {
+        if unsafe { args.GetPrf(&mut prf) }.to_result().is_ok() && prf {
             let mut prf_map = serde_json::Map::new();
             let mut prf_eval_map = serde_json::Map::new();
             let mut prf_eval_first: ThinVec<u8> = ThinVec::new();
@@ -462,30 +454,82 @@ impl XdgPortalAuthService {
             user_verification = "preferred".into();
         }
 
-        // let mut conditionally_mediated = false;
-        // unsafe { args.GetConditionallyMediated(&mut conditionally_mediated) }.to_result()?;
-
-        let json_str = json!({
-            "challenge": challenge_str,
-            "timeout": timeout_ms,
-            "rpId": relying_party_id.to_string(),
-            "allowCredentials": allow_list,
-            "userVerification": user_verification.to_string(),
-            // "hints": [],
-            "extensions": extensions,
-        })
-        .to_string();
+        let mut conditionally_mediated = false;
+        unsafe { args.GetConditionallyMediated(&mut conditionally_mediated) }.to_result()?;
 
         let mut guard = self.transaction.lock().unwrap();
         *guard = Some(TransactionState {
             tid,
             browsing_context_id,
-            // pending_args: None,
+            pending_args: Some(PendingSignArgs {
+                origin: origin.to_string(),
+                challenge_str,
+                timeout_ms,
+                rp_id: relying_party_id.to_string(),
+                allow_credential_ids: allow_list,
+                user_verification: user_verification.to_string(),
+                extensions,
+            }),
             promise: TransactionPromise::Sign(promise),
         });
-        // drop the guard here to ensure we don't deadlock if the call to `register()` below
-        // hairpins the state callback.
-        drop(guard);
+
+        if !conditionally_mediated {
+            // Immediately proceed to the modal UI flow.
+            self.do_get_assertion(None, guard)
+        } else {
+            // Cache the request and wait for the conditional UI to request autofill entries, etc.
+            Ok(())
+        }
+    }
+
+    fn do_get_assertion(
+        &self,
+        mut selected_credential_id: Option<Vec<u8>>,
+        mut guard: MutexGuard<Option<TransactionState>>,
+    ) -> Result<(), nsresult> {
+        let Some(state) = guard.as_mut() else {
+            return Err(NS_ERROR_FAILURE);
+        };
+        let tid = state.tid;
+        let mut pending_args = match state.pending_args.take() {
+            Some(args) => args,
+            None => return Err(NS_ERROR_FAILURE),
+        };
+
+        if let Some(id) = selected_credential_id.take() {
+            if pending_args.allow_credential_ids.is_empty() {
+                pending_args.allow_credential_ids.push(id);
+            } else {
+                // We need to ensure that the selected credential id
+                // was in the original allow_list.
+                pending_args.allow_credential_ids.retain(|i| i == &id);
+                if pending_args.allow_credential_ids.is_empty() {
+                    return Err(NS_ERROR_FAILURE);
+                }
+            }
+        }
+
+        let allow_list: Vec<_> = pending_args
+            .allow_credential_ids
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": URL_SAFE_NO_PAD.encode(&id),
+                    "type": "public-key",
+                })
+            })
+            .collect();
+
+        let json_str = json!({
+            "challenge": pending_args.challenge_str,
+            "timeout": pending_args.timeout_ms,
+            "rpId": pending_args.rp_id,
+            "allowCredentials": allow_list,
+            "userVerification": pending_args.user_verification,
+            // "hints": [],
+            "extensions": pending_args.extensions,
+        })
+        .to_string();
 
         let callback_transaction = self.transaction.clone();
         RunnableBuilder::new("XdgPortalService::GetCredential::DbusSend", move || {
@@ -510,7 +554,10 @@ impl XdgPortalAuthService {
                 "type".to_string(),
                 Variant(Box::new("publicKey".to_string())),
             );
-            req.insert("origin".to_string(), Variant(Box::new(origin.to_string())));
+            req.insert(
+                "origin".to_string(),
+                Variant(Box::new(pending_args.origin.clone())),
+            );
             req.insert(
                 "is_same_origin".to_string(),
                 Variant(Box::new(true)), // TODO!
@@ -547,150 +594,28 @@ impl XdgPortalAuthService {
         .may_block(true)
         .dispatch_background_task()?;
         Ok(())
-
-        // if !conditionally_mediated {
-        //     // Immediately proceed to the modal UI flow.
-        //     self.do_get_assertion(None, guard)
-        // } else {
-        //     // Cache the request and wait for the conditional UI to request autofill entries, etc.
-        //     Ok(())
-        // }
-    }
-
-    fn do_get_assertion(
-        &self,
-        mut _selected_credential_id: Option<Vec<u8>>,
-        mut _guard: MutexGuard<Option<TransactionState>>,
-    ) -> Result<(), nsresult> {
-        Err(NS_ERROR_NOT_IMPLEMENTED)
-        // let Some(state) = guard.as_mut() else {
-        //     return Err(NS_ERROR_FAILURE);
-        // };
-        // let browsing_context_id = state.browsing_context_id;
-        // let tid = state.tid;
-        // let (timeout_ms, mut info) = match state.pending_args.take() {
-        //     Some(TransactionArgs::Sign(timeout_ms, info)) => (timeout_ms, info),
-        //     _ => return Err(NS_ERROR_FAILURE),
-        // };
-
-        // if let Some(id) = selected_credential_id.take() {
-        //     if info.allow_list.is_empty() {
-        //         info.allow_list.push(PublicKeyCredentialDescriptor {
-        //             id,
-        //             transports: vec![],
-        //         });
-        //     } else {
-        //         // We need to ensure that the selected credential id
-        //         // was in the original allow_list.
-        //         info.allow_list.retain(|cred| cred.id == id);
-        //         if info.allow_list.is_empty() {
-        //             return Err(NS_ERROR_FAILURE);
-        //         }
-        //     }
-        // }
-
-        // let (status_tx, status_rx) = channel::<StatusUpdate>();
-        // let status_transaction = self.transaction.clone();
-        // let status_origin = info.origin.to_string();
-        // RunnableBuilder::new(
-        //     "XdgPortalAuthService::GetAssertion::StatusReceiver",
-        //     move || {
-        //         let _ = status_callback(
-        //             status_rx,
-        //             tid,
-        //             &status_origin,
-        //             browsing_context_id,
-        //             status_transaction,
-        //         );
-        //     },
-        // )
-        // .may_block(true)
-        // .dispatch_background_task()?;
-
-        // let uniq_allowed_cred = if info.allow_list.len() == 1 {
-        //     info.allow_list.first().cloned()
-        // } else {
-        //     None
-        // };
-
-        // let callback_transaction = self.transaction.clone();
-        // let state_callback = StateCallback::<Result<SignResult, AuthenticatorError>>::new(
-        //     Box::new(move |mut result| {
-        //         let mut guard = callback_transaction.lock().unwrap();
-        //         let Some(state) = guard.as_mut() else {
-        //             return;
-        //         };
-        //         if state.tid != tid {
-        //             return;
-        //         }
-        //         let TransactionPromise::Sign(ref promise) = state.promise else {
-        //             return;
-        //         };
-        //         if uniq_allowed_cred.is_some() {
-        //             // In CTAP 2.0, but not CTAP 2.1, the assertion object's credential field
-        //             // "May be omitted if the allowList has exactly one credential." If we had
-        //             // a unique allowed credential, then copy its descriptor to the output.
-        //             if let Ok(inner) = result.as_mut() {
-        //                 inner.assertion.credentials = uniq_allowed_cred;
-        //             }
-        //         }
-        //         if should_cancel_prompts(&result) {
-        //             // Some errors are accompanied by prompts that should persist after the
-        //             // operation terminates.
-        //             let _ = cancel_prompts(tid);
-        //         }
-        //         let _ = promise.resolve_or_reject(result.map_err(authrs_to_nserror));
-        //         *guard = None;
-        //     }),
-        // );
-
-        // // TODO(Bug 1855290) Remove this presence prompt
-        // send_prompt(
-        //     BrowserPromptType::Presence,
-        //     tid,
-        //     Some(&info.origin),
-        //     Some(browsing_context_id),
-        // )?;
-
-        // // As in `register`, we are intentionally avoiding `AuthenticatorService` here.
-        // if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
-        //     self.usb_token_manager.lock().unwrap().sign(
-        //         timeout_ms as u64,
-        //         info,
-        //         status_tx,
-        //         state_callback,
-        //     );
-        // } else if static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
-        //     self.test_token_manager
-        //         .sign(timeout_ms as u64, info, status_tx, state_callback);
-        // } else {
-        //     return Err(NS_ERROR_FAILURE);
-        // }
-
-        // Ok(())
     }
 
     xpcom_method!(has_pending_conditional_get => HasPendingConditionalGet(aBrowsingContextId: u64, aOrigin: *const nsAString) -> u64);
     fn has_pending_conditional_get(
         &self,
-        _browsing_context_id: u64,
-        _origin: &nsAString,
+        browsing_context_id: u64,
+        origin: &nsAString,
     ) -> Result<u64, nsresult> {
-        Ok(0)
-        // let mut guard = self.transaction.lock().unwrap();
-        // let Some(state) = guard.as_mut() else {
-        //     return Ok(0);
-        // };
-        // let Some(TransactionArgs::Sign(_, info)) = state.pending_args.as_ref() else {
-        //     return Ok(0);
-        // };
-        // if state.browsing_context_id != browsing_context_id {
-        //     return Ok(0);
-        // }
-        // if !info.origin.eq(&origin.to_string()) {
-        //     return Ok(0);
-        // }
-        // Ok(state.tid)
+        let mut guard = self.transaction.lock().unwrap();
+        let Some(state) = guard.as_mut() else {
+            return Ok(0);
+        };
+        let Some(pending_args) = state.pending_args.as_ref() else {
+            return Ok(0);
+        };
+        if state.browsing_context_id != browsing_context_id {
+            return Ok(0);
+        }
+        if !pending_args.origin.eq(&origin.to_string()) {
+            return Ok(0);
+        }
+        Ok(state.tid)
     }
 
     xpcom_method!(get_autofill_entries => GetAutoFillEntries(aTransactionId: u64) -> ThinVec<Option<RefPtr<nsIWebAuthnAutoFillEntry>>>);
@@ -705,23 +630,18 @@ impl XdgPortalAuthService {
         if state.tid != tid {
             return Err(NS_ERROR_NOT_AVAILABLE);
         }
-        // let Some(TransactionArgs::Sign(_)) = state.pending_args.as_ref() else {
-        //     return Err(NS_ERROR_NOT_AVAILABLE);
-        // };
-        if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
-            // We don't currently support silent discovery for credentials on USB tokens.
-            return Ok(thin_vec![]);
-        // } else if static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
-        //     return self
-        //         .test_token_manager
-        //         .get_autofill_entries(&info.relying_party_id, &info.allow_list);
-        } else {
-            return Err(NS_ERROR_FAILURE);
-        }
+        let Some(_pending_args) = state.pending_args.as_ref() else {
+            return Err(NS_ERROR_NOT_AVAILABLE);
+        };
+        // We don't currently support silent discovery for credentials via xdg portal, YET.
+        // But we would have everything we need here.
+        return Ok(thin_vec![]);
     }
 
     xpcom_method!(select_autofill_entry => SelectAutoFillEntry(aTid: u64, aCredentialId: *const ThinVec<u8>));
     fn select_autofill_entry(&self, tid: u64, credential_id: &ThinVec<u8>) -> Result<(), nsresult> {
+        // As we don't yet support silent discovery, this would never be called, but
+        // it doesn't hurt to have it implemented already for the future
         let mut guard = self.transaction.lock().unwrap();
         let Some(state) = guard.as_mut() else {
             return Err(NS_ERROR_FAILURE);
