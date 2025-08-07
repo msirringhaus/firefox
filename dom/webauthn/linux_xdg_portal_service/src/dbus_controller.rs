@@ -13,9 +13,9 @@ pub(crate) struct DbusController {
 }
 
 impl DbusController {
-    const SERVICE_NAME: &'static str = "xyz.iinuwa.credentials.CredentialManagerUi";
-    const PATH: &'static str = "/xyz/iinuwa/credentials/CredentialManagerUi";
-    const INTERFACE: &'static str = "xyz.iinuwa.credentials.CredentialManagerUi1";
+    const SERVICE_NAME: &'static str = "xyz.iinuwa.credentialsd.Credentials";
+    const PATH: &'static str = "/xyz/iinuwa/credentialsd/Credentials";
+    const INTERFACE: &'static str = "xyz.iinuwa.credentialsd.Credentials1";
     const CREATE_CREDENTIAL_FUNCTION: &'static str = "CreateCredential";
     const GET_CREDENTIAL_FUNCTION: &'static str = "GetCredential";
 
@@ -30,7 +30,7 @@ impl DbusController {
             .conn
             .with_path("org.freedesktop.DBus", "/org/freedesktop/DBus", 5000);
 
-        // 3. Call the "NameHasOwner" method.
+        // First, check if the portal is already running, by calling the "NameHasOwner" method.
         let m = match proxy.method_call_with_args(
             &"org.freedesktop.DBus".into(),
             &"NameHasOwner".into(),
@@ -41,13 +41,34 @@ impl DbusController {
         ) {
             Ok(m) => m,
             Err(e) => {
-                log::info!("Failed to send NameHasOwner via DBUS: {e:?}");
+                log::info!("Failed to send NameHasOwner via D-Bus: {e:?}");
                 return false;
             }
         };
 
         let has_owner: Option<bool> = m.get1();
-        has_owner.unwrap_or_default()
+        let is_running = has_owner.unwrap_or_default();
+
+        if is_running {
+            return true;
+        }
+
+        // If it's not running, check if it is activatable
+        let m = match proxy.method_call_with_args(
+            &"org.freedesktop.DBus".into(),
+            &"ListActivatableNames".into(),
+            |_| { /* Nothing to do */ },
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                log::info!("Failed to send ListActivatableNames via D-Bus: {e:?}");
+                return false;
+            }
+        };
+
+        let activatable_services: Option<Vec<String>> = m.get1();
+        let services = activatable_services.unwrap_or_default();
+        services.iter().any(|name| name == Self::SERVICE_NAME)
     }
 
     pub(crate) fn send_message(
