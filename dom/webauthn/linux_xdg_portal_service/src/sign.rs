@@ -42,7 +42,7 @@ pub(crate) struct SignResult {
 pub(crate) struct SignExtensionsResult {
     pub(crate) large_blob_value: Option<Vec<u8>>,
     pub(crate) large_blob_written: Option<bool>,
-    pub(crate) prf_maybe: Option<bool>,
+    pub(crate) prf_maybe: bool,
     pub(crate) prf_results_first: Option<Vec<u8>>,
     pub(crate) prf_results_second: Option<Vec<u8>>,
 }
@@ -113,13 +113,35 @@ impl SignResult {
 
         let extensions =
             if let Some(extensions) = response_json["clientExtensionResults"].as_object() {
-                // TODO
+                let mut large_blob_written = None;
+                let mut large_blob_value = None;
+                if let Some(large_blob) = extensions.get("largeBlob") {
+                    large_blob_written = large_blob.get("written").and_then(|w| w.as_bool());
+                    large_blob_value = large_blob
+                        .get("blob")
+                        .and_then(|b| b.as_str().and_then(|v| URL_SAFE_NO_PAD.decode(v).ok()));
+                }
+                let mut prf_maybe = false;
+                let mut prf_results_first = None;
+                let mut prf_results_second = None;
+
+                if let Some(prf) = extensions.get("prf") {
+                    prf_maybe = true;
+                    if let Some(results) = prf.get("results").and_then(|r| r.as_object()) {
+                        prf_results_first = results
+                            .get("first")
+                            .and_then(|f| f.as_str().and_then(|f| URL_SAFE_NO_PAD.decode(f).ok()));
+                        prf_results_second = results
+                            .get("second")
+                            .and_then(|s| s.as_str().and_then(|s| URL_SAFE_NO_PAD.decode(s).ok()));
+                    }
+                }
                 Some(SignExtensionsResult {
-                    large_blob_value: None,
-                    large_blob_written: None,
-                    prf_maybe: None,
-                    prf_results_first: None,
-                    prf_results_second: None,
+                    large_blob_value,
+                    large_blob_written,
+                    prf_maybe,
+                    prf_results_first,
+                    prf_results_second,
                 })
             } else {
                 None
@@ -267,13 +289,7 @@ impl WebAuthnSignResult {
     xpcom_method!(get_prf_maybe => GetPrfMaybe() -> bool);
     /// Return true if a PRF output is present, even if all attributes are absent.
     fn get_prf_maybe(&self) -> Result<bool, nsresult> {
-        let Some(prf_maybe) = self
-            .result
-            .extensions
-            .as_ref()
-            .map(|e| e.prf_maybe)
-            .flatten()
-        else {
+        let Some(prf_maybe) = self.result.extensions.as_ref().map(|e| e.prf_maybe) else {
             return Err(NS_ERROR_NOT_AVAILABLE);
         };
         Ok(prf_maybe)

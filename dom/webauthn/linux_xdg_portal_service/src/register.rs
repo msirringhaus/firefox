@@ -96,21 +96,35 @@ impl RegisterResult {
             .as_str()
             .map(String::from);
 
-        let extensions =
-            if let Some(extensions) = response_json["clientExtensionResults"].as_object() {
-                // let hmac_create_secret = extensions["hmac_create_secret"].as_bool();
-                // TODO
-                Some(RegisterExtensionsResult {
-                    hmac_create_secret: None,
-                    large_blob_supported: None,
-                    prf_enabled: None,
-                    prf_results_first: None,
-                    prf_results_second: None,
-                    cred_props_rk: None,
-                })
-            } else {
-                None
-            };
+        let extensions = if let Some(extensions) =
+            response_json["clientExtensionResults"].as_object()
+        {
+            let hmac_create_secret = extensions.get("hmacCreateSecret").and_then(|x| x.as_bool());
+            let large_blob_supported = extensions.get("largeBlob").and_then(|b| {
+                b.as_object()
+                    .and_then(|blob| blob.get("supported").and_then(|s| s.as_bool()))
+            });
+            let prf_enabled = extensions.get("prf").and_then(|p| {
+                p.as_object()
+                    .and_then(|blob| blob.get("enabled").and_then(|s| s.as_bool()))
+            });
+            let prf_results_first = None; // Currently not supported by the spec, but may come in the future
+            let prf_results_second = None; // Currently not supported by the spec, but may come in the future
+            let cred_props_rk = extensions.get("credProps").and_then(|p| {
+                p.as_object()
+                    .and_then(|blob| blob.get("rk").and_then(|s| s.as_bool()))
+            });
+            Some(RegisterExtensionsResult {
+                hmac_create_secret,
+                large_blob_supported,
+                prf_enabled,
+                prf_results_first,
+                prf_results_second,
+                cred_props_rk,
+            })
+        } else {
+            None
+        };
 
         let attestation_object = response_json["response"]["attestationObject"]
             .as_str()

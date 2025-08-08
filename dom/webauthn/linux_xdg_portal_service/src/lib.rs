@@ -197,15 +197,30 @@ impl XdgPortalAuthService {
             extensions.insert("minPinLength".to_string(), json!(min_pin_length));
         }
 
+        // Firefox currently doesn't support largeBlob.support == "preferred", only "required"
+        let mut large_blob_support_required = false;
+        if unsafe { args.GetLargeBlobSupportRequired(&mut large_blob_support_required) }
+            .to_result()
+            .is_ok()
+        {
+            if large_blob_support_required {
+                extensions.insert("largeBlob".to_string(), json!({"support": "required"}));
+            }
+        }
+
         let mut prf = false;
         if unsafe { args.GetPrf(&mut prf) }.to_result().is_ok() && prf {
             let mut prf_map = serde_json::Map::new();
             let mut prf_eval_first: ThinVec<u8> = ThinVec::new();
-            unsafe { args.GetPrfEvalFirst(&mut prf_eval_first) }.to_result()?;
-            prf_map.insert(
-                "first".to_string(),
-                json!(URL_SAFE_NO_PAD.encode(prf_eval_first)),
-            );
+            if unsafe { args.GetPrfEvalFirst(&mut prf_eval_first) }
+                .to_result()
+                .is_ok()
+            {
+                prf_map.insert(
+                    "first".to_string(),
+                    json!(URL_SAFE_NO_PAD.encode(prf_eval_first)),
+                );
+            }
 
             let mut prf_eval_second: ThinVec<u8> = ThinVec::new();
             if unsafe { args.GetPrfEvalSecond(&mut prf_eval_second) }
@@ -446,6 +461,28 @@ impl XdgPortalAuthService {
                 prf_map.insert("evalByCredential".to_string(), json!(prf_eval_by_creds));
             }
             extensions.insert("prf".to_string(), json!(prf_map));
+        }
+
+        let mut large_blob_map = serde_json::Map::new();
+        let mut large_blob_read = false;
+        if unsafe { args.GetLargeBlobRead(&mut large_blob_read) }
+            .to_result()
+            .is_ok()
+        {
+            large_blob_map.insert("support".to_string(), json!("required"));
+        }
+        let mut large_blob_write: ThinVec<u8> = ThinVec::new();
+        if unsafe { args.GetLargeBlobWrite(&mut large_blob_write) }
+            .to_result()
+            .is_ok()
+        {
+            large_blob_map.insert(
+                "write".to_string(),
+                json!(URL_SAFE_NO_PAD.encode(&large_blob_write)),
+            );
+        }
+        if !large_blob_map.is_empty() {
+            extensions.insert("largeBlob".to_string(), json!(large_blob_map));
         }
 
         // https://w3c.github.io/webauthn/#prf-extension
