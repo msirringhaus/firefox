@@ -336,6 +336,7 @@ pub(crate) struct PendingSignArgs {
     pub(crate) allow_credential_ids: Vec<Vec<u8>>,
     pub(crate) user_verification: String,
     pub(crate) extensions: Map<String, Value>,
+    pub(crate) is_same_origin: bool,
 }
 
 #[derive(Clone)]

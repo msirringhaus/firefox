@@ -131,7 +131,6 @@ impl RegisterResult {
             .map(|x| URL_SAFE_NO_PAD.decode(x).ok())
             .flatten();
 
-        // let client_data_json = None;
         let client_data_json = response_json["response"]["clientDataJSON"]
             .as_str()
             .map(|x| URL_SAFE_NO_PAD.decode(x).ok())

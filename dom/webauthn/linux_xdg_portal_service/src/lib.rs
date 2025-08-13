@@ -101,9 +101,13 @@ impl XdgPortalAuthService {
         let mut relying_party_id = nsString::new();
         unsafe { args.GetRpId(&mut *relying_party_id) }.to_result()?;
 
-        // let mut client_data_hash = ThinVec::new();
-        // unsafe { args.GetClientDataHash(&mut client_data_hash) }.to_result()?;
-        // let client_data_hash_str = URL_SAFE_NO_PAD.encode(&client_data_hash);
+        let mut client_data = nsCString::new();
+        unsafe { args.GetClientDataJSON(&mut *client_data) }.to_result()?;
+        let client_data_json: Option<serde_json::Map<_, _>> =
+            serde_json::from_str(&client_data.to_string()).ok();
+        let is_cross_origin = client_data_json
+            .and_then(|o| o.get("crossOrigin").and_then(|c| c.as_bool()))
+            .unwrap_or_default();
 
         let mut timeout_ms = 0u32;
         unsafe { args.GetTimeoutMS(&mut timeout_ms) }.to_result()?;
@@ -306,7 +310,7 @@ impl XdgPortalAuthService {
             req.insert("origin".to_string(), Variant(Box::new(origin.to_string())));
             req.insert(
                 "is_same_origin".to_string(),
-                Variant(Box::new(true)), // TODO!
+                Variant(Box::new(!is_cross_origin)),
             );
             req.insert(
                 "publicKey".to_string(),
@@ -371,9 +375,13 @@ impl XdgPortalAuthService {
         let mut relying_party_id = nsString::new();
         unsafe { args.GetRpId(&mut *relying_party_id) }.to_result()?;
 
-        // let mut client_data_hash = ThinVec::new();
-        // unsafe { args.GetClientDataHash(&mut client_data_hash) }.to_result()?;
-        // let client_data_hash_str = URL_SAFE_NO_PAD.encode(&client_data_hash);
+        let mut client_data = nsCString::new();
+        unsafe { args.GetClientDataJSON(&mut *client_data) }.to_result()?;
+        let client_data_json: Option<serde_json::Map<_, _>> =
+            serde_json::from_str(&client_data.to_string()).ok();
+        let is_cross_origin = client_data_json
+            .and_then(|o| o.get("crossOrigin").and_then(|c| c.as_bool()))
+            .unwrap_or_default();
 
         let mut timeout_ms = 0u32;
         unsafe { args.GetTimeoutMS(&mut timeout_ms) }.to_result()?;
@@ -510,6 +518,7 @@ impl XdgPortalAuthService {
                 allow_credential_ids: allow_list,
                 user_verification: user_verification.to_string(),
                 extensions,
+                is_same_origin: !is_cross_origin,
             }),
             promise: TransactionPromise::Sign(promise),
         });
@@ -601,7 +610,7 @@ impl XdgPortalAuthService {
             );
             req.insert(
                 "is_same_origin".to_string(),
-                Variant(Box::new(true)), // TODO!
+                Variant(Box::new(pending_args.is_same_origin)),
             );
             req.insert(
                 "publicKey".to_string(),
