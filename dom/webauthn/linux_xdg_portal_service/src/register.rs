@@ -2,11 +2,8 @@ use base64::Engine;
 use base64::{self, engine::general_purpose::URL_SAFE_NO_PAD};
 use dbus::arg::{ArgType, RefArg, Variant};
 use dbus::Message;
-use nserror::{
-    nsresult, NS_ERROR_FAILURE, NS_ERROR_NOT_AVAILABLE, NS_ERROR_NOT_IMPLEMENTED, NS_OK,
-};
+use nserror::{nsresult, NS_ERROR_FAILURE, NS_ERROR_NOT_AVAILABLE, NS_OK};
 use nsstring::{nsACString, nsAString, nsCString, nsString};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use thin_vec::ThinVec;
 use xpcom::interfaces::{nsIWebAuthnRegisterPromise, nsIWebAuthnRegisterResult};
@@ -172,11 +169,10 @@ impl RegisterPromise {
     ) -> Result<(), nsresult> {
         match result {
             Ok(result) => {
-                let wrapped_result = WebAuthnRegisterResult::allocate(InitWebAuthnRegisterResult {
-                    result: RefCell::new(result),
-                })
-                .query_interface::<nsIWebAuthnRegisterResult>()
-                .ok_or(NS_ERROR_FAILURE)?;
+                let wrapped_result =
+                    WebAuthnRegisterResult::allocate(InitWebAuthnRegisterResult { result })
+                        .query_interface::<nsIWebAuthnRegisterResult>()
+                        .ok_or(NS_ERROR_FAILURE)?;
                 unsafe { self.0.Resolve(wrapped_result.coerce()) };
             }
             Err(result) => {
@@ -190,13 +186,13 @@ impl RegisterPromise {
 #[xpcom(implement(nsIWebAuthnRegisterResult), atomic)]
 pub struct WebAuthnRegisterResult {
     // result is only borrowed mutably in `Anonymize`.
-    result: RefCell<RegisterResult>,
+    result: RegisterResult,
 }
 
 impl WebAuthnRegisterResult {
     xpcom_method!(get_client_data_json => GetClientDataJSON() -> nsACString);
     fn get_client_data_json(&self) -> Result<nsCString, nsresult> {
-        let Some(client_data_json) = &self.result.borrow().client_data_json else {
+        let Some(client_data_json) = &self.result.client_data_json else {
             return Err(NS_ERROR_NOT_AVAILABLE);
         };
         Ok(client_data_json.into())
@@ -204,7 +200,7 @@ impl WebAuthnRegisterResult {
 
     xpcom_method!(get_attestation_object => GetAttestationObject() -> ThinVec<u8>);
     fn get_attestation_object(&self) -> Result<ThinVec<u8>, nsresult> {
-        let Some(attestation_object) = &self.result.borrow().attestation_object else {
+        let Some(attestation_object) = &self.result.attestation_object else {
             return Err(NS_ERROR_NOT_AVAILABLE);
         };
         Ok(ThinVec::from(attestation_object.as_slice()))
@@ -212,7 +208,7 @@ impl WebAuthnRegisterResult {
 
     xpcom_method!(get_credential_id => GetCredentialId() -> ThinVec<u8>);
     fn get_credential_id(&self) -> Result<ThinVec<u8>, nsresult> {
-        let Some(credential_id) = &self.result.borrow().credential_id else {
+        let Some(credential_id) = &self.result.credential_id else {
             return Err(NS_ERROR_NOT_AVAILABLE);
         };
         Ok(credential_id.as_slice().into())
@@ -222,7 +218,6 @@ impl WebAuthnRegisterResult {
     fn get_transports(&self) -> Result<ThinVec<nsString>, nsresult> {
         Ok(self
             .result
-            .borrow()
             .transports
             .as_ref()
             .map(|ts| ts.iter().map(|t| t.into()).collect())
@@ -233,7 +228,6 @@ impl WebAuthnRegisterResult {
     fn get_hmac_create_secret(&self) -> Result<bool, nsresult> {
         let Some(hmac_create_secret) = self
             .result
-            .borrow()
             .extensions
             .as_ref()
             .and_then(|e| e.hmac_create_secret)
@@ -247,7 +241,6 @@ impl WebAuthnRegisterResult {
     fn get_large_blob_supported(&self) -> Result<bool, nsresult> {
         let Some(large_blob_supported) = self
             .result
-            .borrow()
             .extensions
             .as_ref()
             .and_then(|e| e.large_blob_supported)
@@ -259,13 +252,7 @@ impl WebAuthnRegisterResult {
 
     xpcom_method!(get_prf_enabled => GetPrfEnabled() -> bool);
     fn get_prf_enabled(&self) -> Result<bool, nsresult> {
-        let Some(prf_enabled) = self
-            .result
-            .borrow()
-            .extensions
-            .as_ref()
-            .and_then(|e| e.prf_enabled)
-        else {
+        let Some(prf_enabled) = self.result.extensions.as_ref().and_then(|e| e.prf_enabled) else {
             return Err(NS_ERROR_NOT_AVAILABLE);
         };
         Ok(prf_enabled)
@@ -273,7 +260,7 @@ impl WebAuthnRegisterResult {
 
     xpcom_method!(get_prf_results_first => GetPrfResultsFirst() -> ThinVec<u8>);
     fn get_prf_results_first(&self) -> Result<ThinVec<u8>, nsresult> {
-        let Some(extensions) = &self.result.borrow().extensions else {
+        let Some(extensions) = &self.result.extensions else {
             return Err(NS_ERROR_NOT_AVAILABLE);
         };
 
@@ -286,7 +273,7 @@ impl WebAuthnRegisterResult {
 
     xpcom_method!(get_prf_results_second => GetPrfResultsSecond() -> ThinVec<u8>);
     fn get_prf_results_second(&self) -> Result<ThinVec<u8>, nsresult> {
-        let Some(extensions) = &self.result.borrow().extensions else {
+        let Some(extensions) = &self.result.extensions else {
             return Err(NS_ERROR_NOT_AVAILABLE);
         };
 
@@ -301,7 +288,6 @@ impl WebAuthnRegisterResult {
     fn get_cred_props_rk(&self) -> Result<bool, nsresult> {
         let Some(cred_props_rk) = self
             .result
-            .borrow()
             .extensions
             .as_ref()
             .and_then(|e| e.cred_props_rk)
@@ -319,7 +305,7 @@ impl WebAuthnRegisterResult {
 
     xpcom_method!(get_authenticator_attachment => GetAuthenticatorAttachment() -> nsAString);
     fn get_authenticator_attachment(&self) -> Result<nsString, nsresult> {
-        let Some(authenticator_attachment) = &self.result.borrow().authenticator_attachment else {
+        let Some(authenticator_attachment) = &self.result.authenticator_attachment else {
             return Err(NS_ERROR_FAILURE);
         };
         Ok(authenticator_attachment.into())
