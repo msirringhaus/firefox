@@ -126,6 +126,11 @@ impl RegisterResult {
             None
         };
 
+        // Checking if the "response"-object is there, so that we don't panic below
+        response_json
+            .get("response")
+            .ok_or("Missing 'response' from response_json")?;
+
         let attestation_object = response_json["response"]["attestationObject"]
             .as_str()
             .map(|x| URL_SAFE_NO_PAD.decode(x).ok())
@@ -308,7 +313,8 @@ impl WebAuthnRegisterResult {
 
     xpcom_method!(set_cred_props_rk => SetCredPropsRk(aCredPropsRk: bool));
     fn set_cred_props_rk(&self, _cred_props_rk: bool) -> Result<(), nsresult> {
-        Err(NS_ERROR_NOT_IMPLEMENTED)
+        // libwebauthn set this for us already correctly
+        Ok(())
     }
 
     xpcom_method!(get_authenticator_attachment => GetAuthenticatorAttachment() -> nsAString);
@@ -321,19 +327,12 @@ impl WebAuthnRegisterResult {
 
     xpcom_method!(has_identifying_attestation => HasIdentifyingAttestation() -> bool);
     fn has_identifying_attestation(&self) -> Result<bool, nsresult> {
-        // if self.result.borrow().att_obj.att_stmt != AttestationStatement::None {
-        //     return Ok(true);
-        // }
-        // if let Some(data) = &self.result.borrow().att_obj.auth_data.credential_data {
-        //     return Ok(data.aaguid != AAGuid::default());
-        // }
-        Ok(false)
+        Ok(true)
     }
 
     xpcom_method!(anonymize => Anonymize());
     fn anonymize(&self) -> Result<nsresult, nsresult> {
-        // self.result.borrow_mut().att_obj.anonymize();
-        // Ok(NS_OK)
+        // Currently, we don't offer anonymization
         Err(NS_ERROR_NOT_AVAILABLE)
     }
 }

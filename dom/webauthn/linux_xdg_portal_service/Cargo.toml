@@ -2,7 +2,7 @@
 name = "xdg_portal_auth_service"
 version = "0.1.0"
 edition = "2021"
-authors = ["Martin Sirringhaus", "John Schanck"]
+authors = ["Martin Sirringhaus"]
 
 [dependencies]
 base64 = "^0.22"

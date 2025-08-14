@@ -147,6 +147,11 @@ impl SignResult {
                 None
             };
 
+        // Checking if the "response"-object is there, so that we don't panic below
+        response_json
+            .get("response")
+            .ok_or("Missing 'response' from response_json")?;
+
         let client_data_json = response_json["response"]["clientDataJSON"]
             .as_str()
             .map(|x| URL_SAFE_NO_PAD.decode(x).ok())
@@ -250,12 +255,13 @@ impl WebAuthnSignResult {
 
     xpcom_method!(get_used_app_id => GetUsedAppId() -> bool);
     fn get_used_app_id(&self) -> Result<bool, nsresult> {
-        // self.result.extensions.app_id.ok_or(NS_ERROR_NOT_AVAILABLE)
+        // Not yet supported by libwebauthn
         Err(NS_ERROR_NOT_AVAILABLE)
     }
 
     xpcom_method!(set_used_app_id => SetUsedAppId(aUsedAppId: bool));
     fn set_used_app_id(&self, _used_app_id: bool) -> Result<(), nsresult> {
+        // Not yet supported by libwebauthn
         Err(NS_ERROR_NOT_IMPLEMENTED)
     }
 

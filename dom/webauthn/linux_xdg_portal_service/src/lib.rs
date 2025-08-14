@@ -55,10 +55,6 @@ impl TransactionPromise {
     }
 }
 
-// enum TransactionArgs {
-//     Sign(/* timeout */ u64),
-// }
-
 struct TransactionState {
     tid: u64,
     browsing_context_id: u64,
@@ -66,7 +62,6 @@ struct TransactionState {
     promise: TransactionPromise,
 }
 
-// XdgPortalAuthService provides an nsIWebAuthnService built on top of authenticator-rs.
 #[xpcom(implement(nsIWebAuthnService), atomic)]
 pub struct XdgPortalAuthService {
     transaction: Arc<Mutex<Option<TransactionState>>>,
@@ -250,7 +245,7 @@ impl XdgPortalAuthService {
             );
         }
 
-        let json_str = json!({
+        let public_key_json = json!({
             "challenge": challenge_str,
             "rp": {
                 "id": relying_party_id.to_string(),
@@ -279,12 +274,11 @@ impl XdgPortalAuthService {
             pending_args: None,
             promise: TransactionPromise::Register(promise),
         });
-        // drop the guard here to ensure we don't deadlock if the call to `register()` below
-        // hairpins the state callback.
         drop(guard);
 
         let callback_transaction = self.transaction.clone();
         RunnableBuilder::new("XdgPortalService::MakeCredential::DbusSend", move || {
+            // https://github.com/linux-credentials/credentialsd/blob/main/doc/api.md#credential-types
             // We need to craft a message like this:
             // req = {
             //     "type": Variant('s', "publicKey"),
@@ -294,11 +288,14 @@ impl XdgPortalAuthService {
             //         "request_json": Variant('s', req_json)
             //     })
             // }
-            //
+
             // --- Build the inner dictionary for "publicKey" ---
             // This corresponds to the a{sv} value of the "publicKey" key.
             let mut public_key_dict = HashMap::<String, Variant<Box<dyn RefArg>>>::new();
-            public_key_dict.insert("request_json".to_string(), Variant(Box::new(json_str)));
+            public_key_dict.insert(
+                "request_json".to_string(),
+                Variant(Box::new(public_key_json)),
+            );
 
             // --- Build the main dictionary payload ---
             // This is the top-level a{sv} structure.
@@ -393,6 +390,9 @@ impl XdgPortalAuthService {
         let mut user_verification = nsString::new();
         unsafe { args.GetUserVerification(&mut *user_verification) }.to_result()?;
 
+        // credentialsd currently does not support the appid extension
+        // https://github.com/linux-credentials/libwebauthn/issues/141
+        //
         // let mut app_id = None;
         // let mut maybe_app_id = nsString::new();
         // match unsafe { args.GetAppId(&mut *maybe_app_id) }.to_result() {
@@ -436,7 +436,7 @@ impl XdgPortalAuthService {
                 && !credential_ids.is_empty()
             {
                 // All three functions are guaranteed to return arrays of the same length.
-                // If seconds are missing (because they are optional), then
+                // If `seconds` are missing (because they are optional), then
                 // eval_by_cred_second_maybes[i] will have `false`, and eval_by_cred_seconds[i]
                 // an empty array
                 unsafe { args.GetPrfEvalByCredentialEvalFirst(&mut eval_by_cred_firsts) }
@@ -583,6 +583,7 @@ impl XdgPortalAuthService {
 
         let callback_transaction = self.transaction.clone();
         RunnableBuilder::new("XdgPortalService::GetCredential::DbusSend", move || {
+            // https://github.com/linux-credentials/credentialsd/blob/main/doc/api.md#credential-types
             // We need to craft a message like this:
             // req = {
             //     "type": Variant('s', "publicKey"),
@@ -684,7 +685,6 @@ impl XdgPortalAuthService {
             return Err(NS_ERROR_NOT_AVAILABLE);
         };
         // We don't currently support silent discovery for credentials via xdg portal, YET.
-        // But we would have everything we need here.
         return Ok(thin_vec![]);
     }
 
@@ -726,9 +726,8 @@ impl XdgPortalAuthService {
             // ID does not match.
             return false;
         }
-        // It's possible that we haven't dispatched the request to the usb_token_manager yet,
-        // e.g. if we're waiting for resume_make_credential. So reject the promise and drop the
-        // state here rather than from the StateCallback
+        // It's possible that we haven't dispatched the request via dbus yet.
+        // So reject the promise and drop the state here.
         let _ = state.promise.reject(NS_ERROR_DOM_NOT_ALLOWED_ERR);
         *guard = None;
         true
@@ -737,7 +736,7 @@ impl XdgPortalAuthService {
     xpcom_method!(cancel => Cancel(aTransactionId: u64));
     fn cancel(&self, tid: u64) -> Result<(), nsresult> {
         self.clear_transaction(tid);
-        // TODO: Cancel dbus controller?
+        // TODO: Cancel dbus controller
         Ok(())
     }
 
@@ -745,12 +744,11 @@ impl XdgPortalAuthService {
     fn reset(&self) -> Result<(), nsresult> {
         {
             if let Some(state) = self.transaction.lock().unwrap().take() {
-                // cancel_prompts(state.tid)?;
                 state.promise.reject(NS_ERROR_DOM_ABORT_ERR)?;
             }
-        } // release the transaction lock so a StateCallback can take it
-          // TODO!;
-          // self.usb_token_manager.lock().unwrap().cancel();
+        }
+        // TODO: Cancel dbus controller
+        // self.dbus_controller.lock().unwrap().cancel();
         Ok(())
     }
 
