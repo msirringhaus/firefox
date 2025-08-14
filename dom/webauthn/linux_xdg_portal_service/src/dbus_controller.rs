@@ -1,15 +1,30 @@
-use super::NS_ERROR_DOM_NOT_ALLOWED_ERR;
 use dbus::{
     arg::{IterAppend, RefArg, Variant},
     BusType, Connection, Error, Message,
 };
-use nserror::nsresult;
+use nserror::{
+    nsresult, NS_ERROR_DOM_ABORT_ERR, NS_ERROR_DOM_INVALID_STATE_ERR, NS_ERROR_DOM_NOT_ALLOWED_ERR,
+    NS_ERROR_DOM_NOT_SUPPORTED_ERR, NS_ERROR_DOM_SECURITY_ERR, NS_ERROR_DOM_WRONG_TYPE_ERR,
+};
 use std::collections::HashMap;
 
 use crate::{register::RegisterResult, sign::SignResult};
 
 pub(crate) struct DbusController {
     conn: Connection,
+}
+
+fn portal_to_nserror(e: Option<&str>) -> nsresult {
+    match e {
+        Some("xyz.iinuwa.credentials.AbortError") => NS_ERROR_DOM_ABORT_ERR,
+        Some("xyz.iinuwa.credentials.ConstraintError") => NS_ERROR_DOM_NOT_ALLOWED_ERR,
+        Some("xyz.iinuwa.credentials.InvalidStateError") => NS_ERROR_DOM_INVALID_STATE_ERR,
+        Some("xyz.iinuwa.credentials.NotSupportedError") => NS_ERROR_DOM_NOT_SUPPORTED_ERR,
+        Some("xyz.iinuwa.credentials.SecurityError") => NS_ERROR_DOM_SECURITY_ERR,
+        Some("xyz.iinuwa.credentials.NotAllowedError") => NS_ERROR_DOM_NOT_ALLOWED_ERR,
+        Some("xyz.iinuwa.credentials.TypeError") => NS_ERROR_DOM_WRONG_TYPE_ERR,
+        _ => NS_ERROR_DOM_NOT_ALLOWED_ERR,
+    }
 }
 
 impl DbusController {
@@ -93,11 +108,11 @@ impl DbusController {
             .send_message(Self::CREATE_CREDENTIAL_FUNCTION, msg)
             .map_err(|e| {
                 log::error!("Failed to send webauthn request via DBUS: {e:?}");
-                NS_ERROR_DOM_NOT_ALLOWED_ERR
+                portal_to_nserror(e.message())
             })?;
         RegisterResult::parse_from_dbus(resp).map_err(|e| {
             log::error!("Failed parse webauthn reply from XDG portal: {e:?}");
-            NS_ERROR_DOM_NOT_ALLOWED_ERR
+            NS_ERROR_DOM_INVALID_STATE_ERR
         })
     }
 
@@ -109,7 +124,7 @@ impl DbusController {
             .send_message(Self::GET_CREDENTIAL_FUNCTION, msg)
             .map_err(|e| {
                 log::error!("Failed to send webauthn request via DBUS: {e:?}");
-                NS_ERROR_DOM_NOT_ALLOWED_ERR
+                portal_to_nserror(e.message())
             })?;
         SignResult::parse_from_dbus(resp).map_err(|e| {
             log::error!("Failed parse webauthn reply from XDG portal: {e:?}");

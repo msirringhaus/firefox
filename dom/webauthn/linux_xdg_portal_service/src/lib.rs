@@ -33,13 +33,6 @@ use sign::{PendingSignArgs, SignPromise};
 mod dbus_controller;
 use dbus_controller::DbusController;
 
-// fn authrs_to_nserror(e: AuthenticatorError) -> nsresult {
-//     match e {
-//         AuthenticatorError::CredentialExcluded => NS_ERROR_DOM_INVALID_STATE_ERR,
-//         _ => NS_ERROR_DOM_NOT_ALLOWED_ERR,
-//     }
-// }
-
 #[derive(Clone)]
 enum TransactionPromise {
     Register(RegisterPromise),
@@ -336,7 +329,7 @@ impl XdgPortalAuthService {
                 return;
             };
 
-            let _ = promise.resolve_or_reject(result); // TODO: Do correct error mapping here
+            let _ = promise.resolve_or_reject(result);
             *guard = None;
         })
         .may_block(true)
@@ -639,7 +632,7 @@ impl XdgPortalAuthService {
             let TransactionPromise::Sign(ref promise) = state.promise else {
                 return;
             };
-            let _ = promise.resolve_or_reject(result); // TODO: Do correct error mapping here
+            let _ = promise.resolve_or_reject(result);
             *guard = None;
         })
         .may_block(true)
