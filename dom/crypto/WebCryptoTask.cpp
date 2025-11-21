@@ -120,60 +120,6 @@ enum TelemetryAlgorithm {
     }                                                \
   }
 
-class ClearException {
- public:
-  explicit ClearException(JSContext* aCx) : mCx(aCx) {}
-
-  ~ClearException() { JS_ClearPendingException(mCx); }
-
- private:
-  JSContext* mCx;
-};
-
-template <class OOS>
-static nsresult GetAlgorithmName(JSContext* aCx, const OOS& aAlgorithm,
-                                 nsString& aName) {
-  ClearException ce(aCx);
-
-  if (aAlgorithm.IsString()) {
-    // If string, then treat as algorithm name
-    aName.Assign(aAlgorithm.GetAsString());
-  } else {
-    // Coerce to algorithm and extract name
-    JS::Rooted<JS::Value> value(aCx,
-                                JS::ObjectValue(*aAlgorithm.GetAsObject()));
-    Algorithm alg;
-
-    if (!alg.Init(aCx, value)) {
-      return NS_ERROR_DOM_TYPE_MISMATCH_ERR;
-    }
-
-    aName = alg.mName;
-  }
-
-  if (!NormalizeToken(aName, aName)) {
-    return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
-  }
-
-  return NS_OK;
-}
-
-template <class T, class OOS>
-static nsresult Coerce(JSContext* aCx, T& aTarget, const OOS& aAlgorithm) {
-  ClearException ce(aCx);
-
-  if (!aAlgorithm.IsObject()) {
-    return NS_ERROR_DOM_SYNTAX_ERR;
-  }
-
-  JS::Rooted<JS::Value> value(aCx, JS::ObjectValue(*aAlgorithm.GetAsObject()));
-  if (!aTarget.Init(aCx, value)) {
-    return NS_ERROR_DOM_TYPE_MISMATCH_ERR;
-  }
-
-  return NS_OK;
-}
-
 inline size_t MapHashAlgorithmNameToBlockSize(const nsString& aName) {
   if (aName.EqualsLiteral(WEBCRYPTO_ALG_SHA1) ||
       aName.EqualsLiteral(WEBCRYPTO_ALG_SHA256)) {
@@ -2583,6 +2529,30 @@ class DeriveX25519BitsTask : public ReturnArrayBufferViewTask {
 
     return NS_OK;
   }
+};
+
+class GenerateAsymmetricKeyTask : public WebCryptoTask {
+ public:
+  GenerateAsymmetricKeyTask(nsIGlobalObject* aGlobal, JSContext* aCx,
+                            const ObjectOrString& aAlgorithm, bool aExtractable,
+                            const Sequence<nsString>& aKeyUsages);
+
+ protected:
+  UniquePLArenaPool mArena;
+  UniquePtr<CryptoKeyPair> mKeyPair;
+  nsString mAlgName;
+  CK_MECHANISM_TYPE mMechanism;
+  PK11RSAGenParams mRsaParams;
+  SECKEYDHParams mDhParams;
+  nsString mNamedCurve;
+
+  virtual nsresult DoCrypto() override;
+  virtual void Resolve() override;
+  virtual void Cleanup() override;
+
+ private:
+  UniqueSECKEYPublicKey mPublicKey;
+  UniqueSECKEYPrivateKey mPrivateKey;
 };
 
 GenerateAsymmetricKeyTask::GenerateAsymmetricKeyTask(

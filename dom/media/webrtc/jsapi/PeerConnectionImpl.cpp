@@ -4312,14 +4312,7 @@ void PeerConnectionImpl::UpdateTransport(const JsepTransceiver& aTransceiver,
         candidates.end());
   }
 
-  nsTArray<uint8_t> keyDer;
-  nsTArray<uint8_t> certDer;
-  nsresult rv = Identity()->Serialize(&keyDer, &certDer);
-  if (NS_FAILED(rv)) {
-    CSFLogError(LOGTAG, "%s: Failed to serialize DTLS identity: %d",
-                __FUNCTION__, (int)rv);
-    return;
-  }
+  nsTArray<uint8_t> certFingerprint = Identity()->GetCertFingerprint();
 
   DtlsDigestList digests;
   for (const auto& fingerprint :
@@ -4330,7 +4323,7 @@ void PeerConnectionImpl::UpdateTransport(const JsepTransceiver& aTransceiver,
 
   mTransportHandler->ActivateTransport(
       transport.mTransportId, transport.mLocalUfrag, transport.mLocalPwd,
-      components, ufrag, pwd, keyDer, certDer, Identity()->auth_type(),
+      components, ufrag, pwd, certFingerprint, Identity()->auth_type(),
       transport.mDtls->GetRole() == JsepDtlsTransport::kJsepDtlsClient, digests,
       PrivacyRequested());
 

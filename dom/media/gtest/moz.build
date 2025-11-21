@@ -63,6 +63,7 @@ UNIFIED_SOURCES += [
     "TestOfflineClockDriver.cpp",
     "TestOggWriter.cpp",
     "TestOpusParser.cpp",
+    "TestRTCCertStore.cpp",
     "TestRust.cpp",
     "TestTimeUnit.cpp",
     "TestVideoFrameContainer.cpp",

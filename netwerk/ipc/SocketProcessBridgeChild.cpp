@@ -9,6 +9,7 @@
 #include "mozilla/AppShutdown.h"
 #include "mozilla/Components.h"
 #include "mozilla/dom/ContentChild.h"
+#include "mozilla/dom/RTCCertService.h"
 #include "mozilla/ipc/BackgroundChild.h"
 #include "mozilla/ipc/Endpoint.h"
 #include "mozilla/net/NeckoChild.h"

@@ -93,8 +93,8 @@ class MediaTransportHandler {
       const std::string& aTransportId, const std::string& aLocalUfrag,
       const std::string& aLocalPwd, size_t aComponentCount,
       const std::string& aUfrag, const std::string& aPassword,
-      const nsTArray<uint8_t>& aKeyDer, const nsTArray<uint8_t>& aCertDer,
-      SSLKEAType aAuthType, bool aDtlsClient, const DtlsDigestList& aDigests,
+      const nsTArray<uint8_t>& aCertFingerprint, SSLKEAType aAuthType,
+      bool aDtlsClient, const DtlsDigestList& aDigests,
       bool aPrivacyRequested) = 0;
 
   virtual void RemoveTransportsExcept(

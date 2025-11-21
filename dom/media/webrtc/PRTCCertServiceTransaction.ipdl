@@ -1,0 +1,33 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/*
+ * IPC Transaction protocol for the Cert Service DOM API.
+ * This IPC protocol allows to generate private / public keys and certificate
+ * in socket process and return public key and certificate back to
+ * content process.
+ */
+
+include protocol PBackground;
+
+using PRTime from "prtime.h";
+using mozilla::dom::CertFingerprint from "mozilla/dom/RTCCertServiceData.h";
+using mozilla::dom::CertDataIPC from "mozilla/dom/RTCCertServiceData.h";
+
+namespace mozilla {
+namespace dom {
+
+[ParentProc=Socket, ChildProc=Content, ChildImpl=virtual, ParentImpl=virtual]
+async protocol PRTCCertServiceTransaction {
+  parent:
+    async GenerateCertificate(nsCString aOrigin, uint8_t[] aParam, PRTime aExpires, uint32_t aMechanism, uint32_t aSignatureAlg) returns (CertDataIPC certificate);
+    async RemoveCertificate(CertFingerprint aCertFingerprint);
+    async GetCertificate(CertFingerprint aCertFingerprint) returns (CertDataIPC certificate);
+
+  child:
+    async __delete__();
+};
+
+}
+}

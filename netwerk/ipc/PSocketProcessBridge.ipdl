@@ -10,6 +10,8 @@ include protocol PBackgroundDataBridge;
 include protocol PMediaTransport;
 #endif // MOZ_WEBRTC
 
+include protocol PRTCCertServiceTransaction;
+
 
 namespace mozilla {
 namespace net {
@@ -40,6 +42,8 @@ parent:
     * Similar to the above, this message is for PMediaTransport.
     */
   async InitMediaTransport(Endpoint<PMediaTransportParent> aEndpoint);
+
+  async InitRTCCertServiceTransaction(Endpoint<PRTCCertServiceTransactionParent> aEndpoint);
 #endif // MOZ_WEBRTC
 
 };

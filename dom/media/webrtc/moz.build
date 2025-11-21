@@ -45,6 +45,8 @@ LOCAL_INCLUDES += [
     "/dom/media/systemservices",
 ]
 
+IPDL_SOURCES += ["PRTCCertServiceTransaction.ipdl"]
+
 if CONFIG["MOZ_WEBRTC"]:
     EXPORTS += [
         "MediaEngineRemoteVideoSource.h",
@@ -56,6 +58,10 @@ if CONFIG["MOZ_WEBRTC"]:
         "MediaEngineRemoteVideoSource.cpp",
         "MediaEngineWebRTCAudio.cpp",
         "RTCCertificate.cpp",
+        "RTCCertService.cpp",
+        "RTCCertServiceData.cpp",
+        "RTCCertServiceParent.cpp",
+        "RTCCertStore.cpp",
         "RTCIdentityProviderRegistrar.cpp",
     ]
     # MediaEngineWebRTC.cpp needs to be built separately.
@@ -117,6 +123,10 @@ EXPORTS.mozilla += [
 ]
 EXPORTS.mozilla.dom += [
     "RTCCertificate.h",
+    "RTCCertService.h",
+    "RTCCertServiceData.h",
+    "RTCCertServiceParent.h",
+    "RTCCertStore.h",
 ]
 
 include("/ipc/chromium/chromium-config.mozbuild")
