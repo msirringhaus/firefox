@@ -13,6 +13,7 @@
 
 #include "ErrorList.h"
 #include "MainThreadUtils.h"
+#include "RTCCertService.h"
 #include "cert.h"
 #include "cryptohi.h"
 #include "js/StructuredClone.h"
@@ -23,13 +24,13 @@
 #include "mozilla/OwningNonNull.h"
 #include "mozilla/dom/BindingDeclarations.h"
 #include "mozilla/dom/CryptoBuffer.h"
-#include "mozilla/dom/CryptoKey.h"
 #include "mozilla/dom/KeyAlgorithmBinding.h"
 #include "mozilla/dom/KeyAlgorithmProxy.h"
 #include "mozilla/dom/Promise.h"
+#include "mozilla/dom/RTCCertServiceData.h"
 #include "mozilla/dom/RTCCertificateBinding.h"
+#include "mozilla/dom/RootedDictionary.h"
 #include "mozilla/dom/StructuredCloneHolder.h"
-#include "mozilla/dom/SubtleCryptoBinding.h"
 #include "mozilla/dom/UnionTypes.h"
 #include "mozilla/dom/WebCryptoCommon.h"
 #include "mozilla/dom/WebCryptoTask.h"
@@ -37,6 +38,7 @@
 #include "nsDebug.h"
 #include "nsError.h"
 #include "nsLiteralString.h"
+#include "nsServiceManagerUtils.h"
 #include "nsStringFlags.h"
 #include "nsStringFwd.h"
 #include "nsTLiteralString.h"
@@ -54,7 +56,7 @@
 
 namespace mozilla::dom {
 
-#define RTCCERTIFICATE_SC_VERSION 0x00000001
+#define RTCCERTIFICATE_SC_VERSION 0x00000002
 
 NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(RTCCertificate, mGlobal)
 NS_IMPL_CYCLE_COLLECTING_ADDREF(RTCCertificate)
@@ -70,195 +72,9 @@ NS_INTERFACE_MAP_END
   PRTime(PR_USEC_PER_SEC) * PRTime(60)  /*sec*/ \
       * PRTime(60) /*min*/ * PRTime(24) /*hours*/
 #define EXPIRATION_DEFAULT ONE_DAY* PRTime(30)
-#define EXPIRATION_SLACK ONE_DAY
 #define EXPIRATION_MAX ONE_DAY* PRTime(365) /*year*/
 
-const size_t RTCCertificateCommonNameLength = 16;
 const size_t RTCCertificateMinRsaSize = 1024;
-
-class GenerateRTCCertificateTask : public GenerateAsymmetricKeyTask {
- public:
-  GenerateRTCCertificateTask(nsIGlobalObject* aGlobal, JSContext* aCx,
-                             const ObjectOrString& aAlgorithm,
-                             const Sequence<nsString>& aKeyUsages,
-                             PRTime aExpires)
-      : GenerateAsymmetricKeyTask(aGlobal, aCx, aAlgorithm, true, aKeyUsages),
-        mExpires(aExpires),
-        mAuthType(ssl_kea_null),
-        mCertificate(nullptr),
-        mSignatureAlg(SEC_OID_UNKNOWN) {
-    if (NS_FAILED(mEarlyRv)) {
-      // webrtc-pc says to throw NotSupportedError if we have passed "an
-      // algorithm that the user agent cannot or will not use to generate a
-      // certificate". This catches these cases.
-      mEarlyRv = NS_ERROR_DOM_NOT_SUPPORTED_ERR;
-    }
-  }
-
- private:
-  PRTime mExpires;
-  SSLKEAType mAuthType;
-  UniqueCERTCertificate mCertificate;
-  SECOidTag mSignatureAlg;
-
-  static CERTName* GenerateRandomName(PK11SlotInfo* aSlot) {
-    uint8_t randomName[RTCCertificateCommonNameLength];
-    SECStatus rv =
-        PK11_GenerateRandomOnSlot(aSlot, randomName, sizeof(randomName));
-    if (rv != SECSuccess) {
-      return nullptr;
-    }
-
-    char buf[sizeof(randomName) * 2 + 4];
-    strncpy(buf, "CN=", 4);
-    for (size_t i = 0; i < sizeof(randomName); ++i) {
-      snprintf(&buf[i * 2 + 3], 3, "%.2x", randomName[i]);
-    }
-    buf[sizeof(buf) - 1] = '\0';
-
-    return CERT_AsciiToName(buf);
-  }
-
-  nsresult GenerateCertificate() {
-    UniquePK11SlotInfo slot(PK11_GetInternalSlot());
-    MOZ_ASSERT(slot.get());
-
-    UniqueCERTName subjectName(GenerateRandomName(slot.get()));
-    if (!subjectName) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    UniqueSECKEYPublicKey publicKey(mKeyPair->mPublicKey->GetPublicKey());
-    UniqueCERTSubjectPublicKeyInfo spki(
-        SECKEY_CreateSubjectPublicKeyInfo(publicKey.get()));
-    if (!spki) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    UniqueCERTCertificateRequest certreq(
-        CERT_CreateCertificateRequest(subjectName.get(), spki.get(), nullptr));
-    if (!certreq) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    PRTime now = PR_Now();
-    PRTime notBefore = now - EXPIRATION_SLACK;
-    mExpires += now;
-
-    UniqueCERTValidity validity(CERT_CreateValidity(notBefore, mExpires));
-    if (!validity) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    unsigned long serial;
-    // Note: This serial in principle could collide, but it's unlikely, and we
-    // don't expect anyone to be validating certificates anyway.
-    SECStatus rv = PK11_GenerateRandomOnSlot(
-        slot.get(), reinterpret_cast<unsigned char*>(&serial), sizeof(serial));
-    if (rv != SECSuccess) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    // NB: CERTCertificates created with CERT_CreateCertificate are not safe to
-    // use with other NSS functions like CERT_DupCertificate.  The strategy
-    // here is to create a tbsCertificate ("to-be-signed certificate"), encode
-    // it, and sign it, resulting in a signed DER certificate that can be
-    // decoded into a CERTCertificate.
-    UniqueCERTCertificate tbsCertificate(CERT_CreateCertificate(
-        serial, subjectName.get(), validity.get(), certreq.get()));
-    if (!tbsCertificate) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    MOZ_ASSERT(mSignatureAlg != SEC_OID_UNKNOWN);
-    PLArenaPool* arena = tbsCertificate->arena;
-
-    rv = SECOID_SetAlgorithmID(arena, &tbsCertificate->signature, mSignatureAlg,
-                               nullptr);
-    if (rv != SECSuccess) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    // Set version to X509v3.
-    *(tbsCertificate->version.data) = SEC_CERTIFICATE_VERSION_3;
-    tbsCertificate->version.len = 1;
-
-    SECItem innerDER = {siBuffer, nullptr, 0};
-    if (!SEC_ASN1EncodeItem(arena, &innerDER, tbsCertificate.get(),
-                            SEC_ASN1_GET(CERT_CertificateTemplate))) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    SECItem* certDer = PORT_ArenaZNew(arena, SECItem);
-    if (!certDer) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    UniqueSECKEYPrivateKey privateKey(mKeyPair->mPrivateKey->GetPrivateKey());
-    rv = SEC_DerSignData(arena, certDer, innerDER.data, innerDER.len,
-                         privateKey.get(), mSignatureAlg);
-    if (rv != SECSuccess) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-
-    mCertificate.reset(CERT_NewTempCertificate(CERT_GetDefaultCertDB(), certDer,
-                                               nullptr, false, true));
-    if (!mCertificate) {
-      return NS_ERROR_DOM_UNKNOWN_ERR;
-    }
-    return NS_OK;
-  }
-
-  nsresult BeforeCrypto() override {
-    if (mAlgName.EqualsLiteral(WEBCRYPTO_ALG_RSASSA_PKCS1)) {
-      // Double check that size is OK.
-      auto sz = static_cast<size_t>(mRsaParams.keySizeInBits);
-      if (sz < RTCCertificateMinRsaSize) {
-        return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
-      }
-
-      KeyAlgorithmProxy& alg = mKeyPair->mPublicKey->Algorithm();
-      if (alg.mType != KeyAlgorithmProxy::RSA ||
-          !alg.mRsa.mHash.mName.EqualsLiteral(WEBCRYPTO_ALG_SHA256)) {
-        return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
-      }
-
-      mSignatureAlg = SEC_OID_PKCS1_SHA256_WITH_RSA_ENCRYPTION;
-      mAuthType = ssl_kea_rsa;
-
-    } else if (mAlgName.EqualsLiteral(WEBCRYPTO_ALG_ECDSA)) {
-      // We only support good curves in WebCrypto.
-      // If that ever changes, check that a good one was chosen.
-
-      mSignatureAlg = SEC_OID_ANSIX962_ECDSA_SHA256_SIGNATURE;
-      mAuthType = ssl_kea_ecdh;
-    } else {
-      return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
-    }
-    return NS_OK;
-  }
-
-  nsresult DoCrypto() override {
-    nsresult rv = GenerateAsymmetricKeyTask::DoCrypto();
-    NS_ENSURE_SUCCESS(rv, rv);
-
-    rv = GenerateCertificate();
-    NS_ENSURE_SUCCESS(rv, rv);
-
-    return NS_OK;
-  }
-
-  virtual void Resolve() override {
-    // Make copies of the private key and certificate, otherwise, when this
-    // object is deleted, the structures they reference will be deleted too.
-    UniqueSECKEYPrivateKey key = mKeyPair->mPrivateKey->GetPrivateKey();
-    CERTCertificate* cert = CERT_DupCertificate(mCertificate.get());
-    RefPtr<RTCCertificate> result =
-        new RTCCertificate(mResultPromise->GetParentObject(), key.release(),
-                           cert, mAuthType, mExpires);
-    mResultPromise->MaybeResolve(result);
-  }
-};
 
 static PRTime ReadExpires(JSContext* aCx, const ObjectOrString& aOptions,
                           ErrorResult& aRv) {
@@ -286,46 +102,175 @@ static PRTime ReadExpires(JSContext* aCx, const ObjectOrString& aOptions,
   return static_cast<PRTime>(expiration.mExpires.Value() * PR_USEC_PER_MSEC);
 }
 
+RTCCertificateMetadata::RTCCertificateMetadata()
+    : mExpires(0),
+      mSignatureAlg(SEC_OID_UNKNOWN),
+      mMechanism(CKM_INVALID_MECHANISM),
+      mRsaParams() {}
+
+nsresult RTCCertificateMetadata::Init(JSContext* aCx, nsCString aOrigin,
+                                      const ObjectOrString& aAlgorithm,
+                                      SSLKEAType* aAuthType, ErrorResult& aRv) {
+  mExpires = ReadExpires(aCx, aAlgorithm, aRv);
+  if (aRv.Failed()) {
+    return NS_ERROR_DOM_UNKNOWN_ERR;
+  }
+
+  mArena = UniquePLArenaPool(PORT_NewArena(DER_DEFAULT_CHUNKSIZE));
+  if (!mArena) {
+    return NS_ERROR_DOM_UNKNOWN_ERR;
+  }
+
+  // Extract algorithm name
+  nsresult rv = GetAlgorithmName(aCx, aAlgorithm, mAlgName);
+  NS_ENSURE_SUCCESS(rv, NS_ERROR_DOM_NOT_SUPPORTED_ERR);
+
+  // Construct an appropriate KeyAlorithm
+  if (mAlgName.EqualsLiteral(WEBCRYPTO_ALG_RSASSA_PKCS1)) {
+    RootedDictionary<RsaHashedKeyGenParams> params(aCx);
+    rv = Coerce(aCx, params, aAlgorithm);
+    NS_ENSURE_SUCCESS(rv, NS_ERROR_DOM_SYNTAX_ERR);
+
+    // Pull relevant info
+    uint32_t modulusLength = params.mModulusLength;
+    CryptoBuffer publicExponent;
+    if (!publicExponent.Assign(params.mPublicExponent)) {
+      return NS_ERROR_DOM_UNKNOWN_ERR;
+    }
+
+    nsString hashName;
+    rv = GetAlgorithmName(aCx, params.mHash, hashName);
+    NS_ENSURE_SUCCESS(rv, rv);
+    if (!hashName.EqualsLiteral(WEBCRYPTO_ALG_SHA256)) {
+      return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
+    }
+
+    mMechanism = CKM_RSA_PKCS_KEY_PAIR_GEN;
+
+    // Set up params struct
+    mRsaParams.keySizeInBits = modulusLength;
+    bool converted = publicExponent.GetBigIntValue(mRsaParams.pe);
+    if (!converted) {
+      return NS_ERROR_DOM_INVALID_ACCESS_ERR;
+    }
+
+    auto sz = static_cast<size_t>(mRsaParams.keySizeInBits);
+    if (sz < RTCCertificateMinRsaSize) {
+      return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
+    }
+
+    SerializeRSAParam(&mParam, &mRsaParams);
+
+    mSignatureAlg = SEC_OID_PKCS1_SHA256_WITH_RSA_ENCRYPTION;
+    *aAuthType = ssl_kea_rsa;
+  } else if (mAlgName.EqualsLiteral(WEBCRYPTO_ALG_ECDSA)) {
+    RootedDictionary<EcKeyGenParams> params(aCx);
+    rv = Coerce(aCx, params, aAlgorithm);
+    NS_ENSURE_SUCCESS(rv, NS_ERROR_DOM_SYNTAX_ERR);
+
+    if (!NormalizeToken(params.mNamedCurve, mNamedCurve)) {
+      return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
+    }
+    mMechanism = CKM_EC_KEY_PAIR_GEN;
+    if (!SerializeECParams(&mParam,
+                           CreateECParamsForCurve(mNamedCurve, mArena.get()))) {
+      return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
+    }
+
+    // We only support good curves in WebCrypto.
+    // If that ever changes, check that a good one was chosen.
+    mSignatureAlg = SEC_OID_ANSIX962_ECDSA_SHA256_SIGNATURE;
+    *aAuthType = ssl_kea_ecdh;
+  } else {
+    return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
+  }
+
+  mOrigin = std::move(aOrigin);
+  return NS_OK;
+}
+
+RefPtr<RTCCertificatePromise> RTCCertificateMetadata::Generate(
+    RTCCertService* aCertService) {
+  if (!aCertService) {
+    return RTCCertificatePromise::CreateAndReject(NS_ERROR_FAILURE, __func__);
+  }
+  return aCertService->GenerateCertificate(mOrigin, mParam, mExpires,
+                                           mMechanism, mSignatureAlg);
+}
+
+already_AddRefed<Promise> RTCCertificate::Generate(
+    const GlobalObject& aGlobal, const ObjectOrString& aOptions,
+    ErrorResult& aRv) {
+  nsIGlobalObject* global = xpc::NativeGlobal(aGlobal.Get());
+  RefPtr<Promise> resultPromise = Promise::Create(global, aRv);
+  if (aRv.Failed()) {
+    return nullptr;
+  }
+
+  nsCOMPtr<nsIPrincipal> principal = global->PrincipalOrNull();
+  if (!principal) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
+
+  nsAutoCString origin;
+  nsresult rv = principal->GetOrigin(origin);
+  if (NS_FAILED(rv)) {
+    aRv.Throw(rv);
+    return nullptr;
+  }
+
+  rv = mData.Init(aGlobal.Context(), std::move(origin), aOptions, &mAuthType,
+                  aRv);
+  if (NS_FAILED(rv)) {
+    // webrtc-pc says to throw NotSupportedError if we have passed "an
+    // algorithm that the user agent cannot or will not use to generate a
+    // certificate". This catches these cases.
+    if (!aRv.Failed()) {
+      aRv.Throw(NS_ERROR_DOM_NOT_SUPPORTED_ERR);
+    }
+    return nullptr;
+  }
+
+  auto* certService = RTCCertService::GetInstance();
+  if (!certService) {
+    aRv.Throw(NS_ERROR_NOT_IMPLEMENTED);
+    return nullptr;
+  }
+
+  mData.Generate(certService)
+      ->Then(
+          GetCurrentSerialEventTarget(), __func__,
+          [self = RefPtr<RTCCertificate>(this),
+           resultPromise](UniquePtr<CertData>&& aResult) mutable {
+            self->mCertificate = std::move(aResult->mCertificate);
+            self->mExpires = aResult->mExpires;
+            self->mCertFingerprint = aResult->mFingerprint;
+            resultPromise->MaybeResolve(self);
+          },
+          [self = RefPtr<RTCCertificate>(this), resultPromise](
+              nsresult aError) { resultPromise->MaybeReject(aError); });
+
+  return resultPromise.forget();
+}
+
 already_AddRefed<Promise> RTCCertificate::GenerateCertificate(
     const GlobalObject& aGlobal, const ObjectOrString& aOptions,
     ErrorResult& aRv, JS::Compartment* aCompartment) {
-  nsIGlobalObject* global = xpc::NativeGlobal(aGlobal.Get());
-  RefPtr<Promise> p = Promise::Create(global, aRv);
-  if (aRv.Failed()) {
-    return nullptr;
-  }
-  Sequence<nsString> usages;
-  if (!usages.AppendElement(u"sign"_ns, fallible)) {
-    aRv.Throw(NS_ERROR_OUT_OF_MEMORY);
-    return nullptr;
-  }
-
-  PRTime expires = ReadExpires(aGlobal.Context(), aOptions, aRv);
-  if (aRv.Failed()) {
-    return nullptr;
-  }
-  RefPtr<WebCryptoTask> task = new GenerateRTCCertificateTask(
-      global, aGlobal.Context(), aOptions, usages, expires);
-  task->DispatchWithPromise(p);
-  return p.forget();
+  RefPtr<RTCCertificate> cert =
+      new RTCCertificate(xpc::NativeGlobal(aGlobal.Get()));
+  return cert->Generate(aGlobal, aOptions, aRv);
 }
 
-RTCCertificate::RTCCertificate(nsIGlobalObject* aGlobal)
-    : mGlobal(aGlobal),
-      mPrivateKey(nullptr),
-      mCertificate(nullptr),
-      mAuthType(ssl_kea_null),
-      mExpires(0) {}
+RTCCertificate::RTCCertificate(nsIGlobalObject* aGlobal) : mGlobal(aGlobal) {};
 
-RTCCertificate::RTCCertificate(nsIGlobalObject* aGlobal,
-                               SECKEYPrivateKey* aPrivateKey,
-                               CERTCertificate* aCertificate,
-                               SSLKEAType aAuthType, PRTime aExpires)
-    : mGlobal(aGlobal),
-      mPrivateKey(aPrivateKey),
-      mCertificate(aCertificate),
-      mAuthType(aAuthType),
-      mExpires(aExpires) {}
+RTCCertificate::~RTCCertificate() {
+  /* TODO -> how to handle clone?
+    if (mCertService && mCertificate) {
+      mCertService->RemoveCertificate(mCertFingerprint);
+    }
+  */
+}
 
 void RTCCertificate::GetFingerprints(
     nsTArray<dom::RTCDtlsFingerprint>& aFingerprintsOut) {
@@ -355,13 +300,10 @@ void RTCCertificate::GetFingerprints(
 }
 
 RefPtr<DtlsIdentity> RTCCertificate::CreateDtlsIdentity() const {
-  if (!mPrivateKey || !mCertificate) {
+  if (!mCertificate) {
     return nullptr;
   }
-  UniqueSECKEYPrivateKey key(SECKEY_CopyPrivateKey(mPrivateKey.get()));
-  UniqueCERTCertificate cert(CERT_DupCertificate(mCertificate.get()));
-  RefPtr<DtlsIdentity> id =
-      new DtlsIdentity(std::move(key), std::move(cert), mAuthType);
+  RefPtr<DtlsIdentity> id = new DtlsIdentity(mCertFingerprint, mAuthType);
   return id;
 }
 
@@ -370,17 +312,10 @@ JSObject* RTCCertificate::WrapObject(JSContext* aCx,
   return RTCCertificate_Binding::Wrap(aCx, this, aGivenProto);
 }
 
-bool RTCCertificate::WritePrivateKey(JSStructuredCloneWriter* aWriter) const {
-  JsonWebKey jwk;
-  nsresult rv = CryptoKey::PrivateKeyToJwk(mPrivateKey.get(), jwk);
-  if (NS_FAILED(rv)) {
-    return false;
-  }
-  nsString json;
-  if (!jwk.ToJSON(json)) {
-    return false;
-  }
-  return StructuredCloneHolder::WriteString(aWriter, json);
+bool RTCCertificate::WriteCertificateFingerprint(
+    JSStructuredCloneWriter* aWriter) const {
+  return JS_WriteBytes(aWriter, mCertFingerprint.mHash,
+                       CertFingerprint::sHashByteLen);
 }
 
 bool RTCCertificate::WriteCertificate(JSStructuredCloneWriter* aWriter) const {
@@ -396,27 +331,23 @@ bool RTCCertificate::WriteCertificate(JSStructuredCloneWriter* aWriter) const {
 
 bool RTCCertificate::WriteStructuredClone(
     JSContext* aCx, JSStructuredCloneWriter* aWriter) const {
-  if (!mPrivateKey || !mCertificate) {
+  if (!mCertificate) {
     return false;
   }
 
   return JS_WriteUint32Pair(aWriter, RTCCERTIFICATE_SC_VERSION, mAuthType) &&
          JS_WriteUint32Pair(aWriter, (mExpires >> 32) & 0xffffffff,
                             mExpires & 0xffffffff) &&
-         WritePrivateKey(aWriter) && WriteCertificate(aWriter);
+         WriteCertificateFingerprint(aWriter) && WriteCertificate(aWriter);
 }
 
-bool RTCCertificate::ReadPrivateKey(JSStructuredCloneReader* aReader) {
-  nsString json;
-  if (!StructuredCloneHolder::ReadString(aReader, json)) {
+bool RTCCertificate::ReadCertificateFingerprint(
+    JSStructuredCloneReader* aReader) {
+  if (!JS_ReadBytes(aReader, mCertFingerprint.mHash,
+                    CertFingerprint::sHashByteLen)) {
     return false;
   }
-  JsonWebKey jwk;
-  if (!jwk.Init(json)) {
-    return false;
-  }
-  mPrivateKey = CryptoKey::PrivateKeyFromJwk(jwk);
-  return !!mPrivateKey;
+  return true;
 }
 
 bool RTCCertificate::ReadCertificate(JSStructuredCloneReader* aReader) {
@@ -454,7 +385,8 @@ already_AddRefed<RTCCertificate> RTCCertificate::ReadStructuredClone(
   }
   cert->mExpires = static_cast<PRTime>(high) << 32 | low;
 
-  if (!cert->ReadPrivateKey(aReader) || !cert->ReadCertificate(aReader)) {
+  if (!cert->ReadCertificateFingerprint(aReader) ||
+      !cert->ReadCertificate(aReader)) {
     return nullptr;
   }
 

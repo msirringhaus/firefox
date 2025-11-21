@@ -41,9 +41,9 @@ class MediaTransportParent : public dom::PMediaTransportParent {
       const string& transportId, const string& localUfrag,
       const string& localPwd, const int& componentCount,
       const string& remoteUfrag, const string& remotePwd,
-      nsTArray<uint8_t>&& keyDer, nsTArray<uint8_t>&& certDer,
-      const int& authType, const bool& dtlsClient,
-      const DtlsDigestList& digests, const bool& privacyRequested);
+      nsTArray<uint8_t>&& certFingerprint, const int& authType,
+      const bool& dtlsClient, const DtlsDigestList& digests,
+      const bool& privacyRequested);
   mozilla::ipc::IPCResult RecvRemoveTransportsExcept(
       const StringVector& transportIds);
   mozilla::ipc::IPCResult RecvStartIceChecks(const bool& isControlling,

@@ -27,6 +27,9 @@ class SocketProcessBridgeParent final : public PSocketProcessBridgeParent {
 #ifdef MOZ_WEBRTC
   mozilla::ipc::IPCResult RecvInitMediaTransport(
       Endpoint<PMediaTransportParent>&& aEndpoint);
+
+  mozilla::ipc::IPCResult RecvInitRTCCertServiceTransaction(
+      Endpoint<PRTCCertServiceTransactionParent>&& aEndpoint);
 #endif
 
   void ActorDestroy(ActorDestroyReason aReason) override;

@@ -60,6 +60,7 @@
 #include "mozilla/dom/simpledb/ActorsParent.h"
 #include "mozilla/dom/cache/BoundStorageKeyParent.h"
 #include "mozilla/dom/VsyncParent.h"
+#include "mozilla/dom/PRTCCertServiceTransactionParent.h"
 #include "mozilla/ipc/BackgroundParent.h"
 #include "mozilla/ipc/BackgroundUtils.h"
 #include "mozilla/ipc/Endpoint.h"
