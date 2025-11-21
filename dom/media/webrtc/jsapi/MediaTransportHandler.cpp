@@ -100,13 +100,15 @@ class MediaTransportHandlerSTS : public MediaTransportHandler,
                          // via IPC anymore
                          const nsTArray<NrIceStunAddr>& aStunAddrs) override;
 
-  void ActivateTransport(
-      const std::string& aTransportId, const std::string& aLocalUfrag,
-      const std::string& aLocalPwd, size_t aComponentCount,
-      const std::string& aUfrag, const std::string& aPassword,
-      const nsTArray<uint8_t>& aKeyDer, const nsTArray<uint8_t>& aCertDer,
-      SSLKEAType aAuthType, bool aDtlsClient, const DtlsDigestList& aDigests,
-      bool aPrivacyRequested) override;
+  void ActivateTransport(const std::string& aTransportId,
+                         const std::string& aLocalUfrag,
+                         const std::string& aLocalPwd, size_t aComponentCount,
+                         const std::string& aUfrag,
+                         const std::string& aPassword,
+                         const nsTArray<uint8_t>& aCertFingerprint,
+                         SSLKEAType aAuthType, bool aDtlsClient,
+                         const DtlsDigestList& aDigests,
+                         bool aPrivacyRequested) override;
 
   void RemoveTransportsExcept(
       const std::set<std::string>& aTransportIds) override;
@@ -786,14 +788,13 @@ void MediaTransportHandlerSTS::ActivateTransport(
     const std::string& aTransportId, const std::string& aLocalUfrag,
     const std::string& aLocalPwd, size_t aComponentCount,
     const std::string& aUfrag, const std::string& aPassword,
-    const nsTArray<uint8_t>& aKeyDer, const nsTArray<uint8_t>& aCertDer,
-    SSLKEAType aAuthType, bool aDtlsClient, const DtlsDigestList& aDigests,
-    bool aPrivacyRequested) {
+    const nsTArray<uint8_t>& aCertFingerprint, SSLKEAType aAuthType,
+    bool aDtlsClient, const DtlsDigestList& aDigests, bool aPrivacyRequested) {
   MOZ_RELEASE_ASSERT(mInitPromise);
 
   mInitPromise->Then(
       mStsThread, __func__,
-      [=, keyDer = aKeyDer.Clone(), certDer = aCertDer.Clone(),
+      [=, aCertFingerprint = aCertFingerprint.Clone(),
        self = RefPtr<MediaTransportHandlerSTS>(this)]() {
         if (!mIceCtx) {
           return;  // Probably due to XPCOM shutdown
@@ -801,7 +802,7 @@ void MediaTransportHandlerSTS::ActivateTransport(
 
         MOZ_ASSERT(aComponentCount);
         RefPtr<DtlsIdentity> dtlsIdentity(
-            DtlsIdentity::Deserialize(keyDer, certDer, aAuthType));
+            DtlsIdentity::FromCertFingerprint(aCertFingerprint, aAuthType));
         if (!dtlsIdentity) {
           MOZ_ASSERT(false);
           return;

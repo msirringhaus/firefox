@@ -10,6 +10,7 @@
 #include "cryptohi.h"
 #include "keyhi.h"
 #include "mozilla/Sprintf.h"
+#include "mozilla/dom/RTCCertCache.h"
 #include "mozpkix/nss_scoped_ptrs.h"
 #include "nsError.h"
 #include "pk11pub.h"
@@ -19,133 +20,14 @@
 
 namespace mozilla {
 
-SECItem* WrapPrivateKeyInfoWithEmptyPassword(
-    SECKEYPrivateKey* pk) /* encrypt this private key */
-{
-  if (!pk) {
-    PR_SetError(SEC_ERROR_INVALID_ARGS, 0);
-    return nullptr;
-  }
-
-  UniquePK11SlotInfo slot(PK11_GetInternalSlot());
-  if (!slot) {
-    return nullptr;
-  }
-
-  // For private keys, NSS cannot export anything other than RSA, but we need EC
-  // also. So, we use the private key encryption function to serialize instead,
-  // using a hard-coded dummy password; this is not intended to provide any
-  // additional security, it just works around a limitation in NSS.
-  SECItem dummyPassword = {siBuffer, nullptr, 0};
-  UniqueSECKEYEncryptedPrivateKeyInfo epki(PK11_ExportEncryptedPrivKeyInfo(
-      slot.get(), SEC_OID_AES_128_CBC, &dummyPassword, pk, 1, nullptr));
-
-  if (!epki) {
-    return nullptr;
-  }
-
-  return SEC_ASN1EncodeItem(
-      nullptr, nullptr, epki.get(),
-      NSS_Get_SECKEY_EncryptedPrivateKeyInfoTemplate(nullptr, false));
-}
-
-SECStatus UnwrapPrivateKeyInfoWithEmptyPassword(
-    SECItem* derPKI, const UniqueCERTCertificate& aCert,
-    SECKEYPrivateKey** privk) {
-  if (!derPKI || !aCert || !privk) {
-    PR_SetError(SEC_ERROR_INVALID_ARGS, 0);
-    return SECFailure;
-  }
-
-  UniqueSECKEYPublicKey publicKey(CERT_ExtractPublicKey(aCert.get()));
-  // This is a pointer to data inside publicKey
-  SECItem* publicValue = nullptr;
-  switch (publicKey->keyType) {
-    case dsaKey:
-      publicValue = &publicKey->u.dsa.publicValue;
-      break;
-    case dhKey:
-      publicValue = &publicKey->u.dh.publicValue;
-      break;
-    case rsaKey:
-      publicValue = &publicKey->u.rsa.modulus;
-      break;
-    case ecKey:
-      publicValue = &publicKey->u.ec.publicValue;
-      break;
-    default:
-      MOZ_ASSERT(false);
-      PR_SetError(SSL_ERROR_BAD_CERTIFICATE, 0);
-      return SECFailure;
-  }
-
-  UniquePK11SlotInfo slot(PK11_GetInternalSlot());
-  if (!slot) {
-    return SECFailure;
-  }
-
-  UniquePLArenaPool temparena(PORT_NewArena(DER_DEFAULT_CHUNKSIZE));
-  if (!temparena) {
-    return SECFailure;
-  }
-
-  SECKEYEncryptedPrivateKeyInfo* epki =
-      PORT_ArenaZNew(temparena.get(), SECKEYEncryptedPrivateKeyInfo);
-  if (!epki) {
-    return SECFailure;
-  }
-
-  SECStatus rv = SEC_ASN1DecodeItem(
-      temparena.get(), epki,
-      NSS_Get_SECKEY_EncryptedPrivateKeyInfoTemplate(nullptr, false), derPKI);
-  if (rv != SECSuccess) {
-    // If SEC_ASN1DecodeItem fails, we cannot assume anything about the
-    // validity of the data in epki. The best we can do is free the arena
-    // and return.
-    return rv;
-  }
-
-  // See comment in WrapPrivateKeyInfoWithEmptyPassword about this
-  // dummy password stuff.
-  SECItem dummyPassword = {siBuffer, nullptr, 0};
-  return PK11_ImportEncryptedPrivateKeyInfoAndReturnKey(
-      slot.get(), epki, &dummyPassword, nullptr, publicValue, false, false,
-      publicKey->keyType, KU_ALL, privk, nullptr);
-}
-
-nsresult DtlsIdentity::Serialize(nsTArray<uint8_t>* aKeyDer,
-                                 nsTArray<uint8_t>* aCertDer) {
-  ScopedSECItem derPki(WrapPrivateKeyInfoWithEmptyPassword(private_key_.get()));
-  if (!derPki) {
-    return NS_ERROR_FAILURE;
-  }
-
-  aKeyDer->AppendElements(derPki->data, derPki->len);
-  aCertDer->AppendElements(cert_->derCert.data, cert_->derCert.len);
-  return NS_OK;
+nsTArray<uint8_t> DtlsIdentity::GetCertFingerprint() {
+  return cert_fingerprint_;
 }
 
 /* static */
-RefPtr<DtlsIdentity> DtlsIdentity::Deserialize(
-    const nsTArray<uint8_t>& aKeyDer, const nsTArray<uint8_t>& aCertDer,
-    SSLKEAType authType) {
-  SECItem certDer = {siBuffer, const_cast<uint8_t*>(aCertDer.Elements()),
-                     static_cast<unsigned int>(aCertDer.Length())};
-  UniqueCERTCertificate cert(CERT_NewTempCertificate(
-      CERT_GetDefaultCertDB(), &certDer, nullptr, true, true));
-
-  SECItem derPKI = {siBuffer, const_cast<uint8_t*>(aKeyDer.Elements()),
-                    static_cast<unsigned int>(aKeyDer.Length())};
-
-  SECKEYPrivateKey* privateKey;
-  if (UnwrapPrivateKeyInfoWithEmptyPassword(&derPKI, cert, &privateKey) !=
-      SECSuccess) {
-    MOZ_ASSERT(false);
-    return nullptr;
-  }
-
-  return new DtlsIdentity(UniqueSECKEYPrivateKey(privateKey), std::move(cert),
-                          authType);
+RefPtr<DtlsIdentity> DtlsIdentity::FromCertFingerprint(
+    const nsTArray<uint8_t>& certFingerprint, SSLKEAType authType) {
+  return new DtlsIdentity(dom::CertFingerprint(certFingerprint), authType);
 }
 
 RefPtr<DtlsIdentity> DtlsIdentity::Generate() {
@@ -282,7 +164,7 @@ RefPtr<DtlsIdentity> DtlsIdentity::Generate() {
 
 constexpr nsLiteralCString DtlsIdentity::DEFAULT_HASH_ALGORITHM;
 
-nsresult DtlsIdentity::ComputeFingerprint(DtlsDigest* digest) const {
+nsresult DtlsIdentity::ComputeFingerprint(DtlsDigest* digest) {
   const UniqueCERTCertificate& c = cert();
   MOZ_ASSERT(c);
 
@@ -325,6 +207,30 @@ nsresult DtlsIdentity::ComputeFingerprint(const UniqueCERTCertificate& cert,
   }
 
   return NS_OK;
+}
+
+const UniqueCERTCertificate& DtlsIdentity::cert() {
+  if (!cert_) {
+    dom::GeneratedCertificate* genCert =
+        dom::RTCCertCache::LookupCert(cert_fingerprint_);
+    if (genCert) {
+      cert_ = UniqueCERTCertificate(
+          CERT_DupCertificate(genCert->mCertificate.get()));
+    }
+  }
+  return cert_;
+}
+
+const UniqueSECKEYPrivateKey& DtlsIdentity::privkey() {
+  if (!private_key_) {
+    dom::GeneratedCertificate* genCert =
+        dom::RTCCertCache::LookupCert(cert_fingerprint_);
+    if (genCert) {
+      private_key_ = UniqueSECKEYPrivateKey(
+          SECKEY_CopyPrivateKey(genCert->mPrivateKey.get()));
+    }
+  }
+  return private_key_;
 }
 
 }  // namespace mozilla

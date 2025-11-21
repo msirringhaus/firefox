@@ -14,8 +14,12 @@
 #include "js/RootingAPI.h"
 #include "keythi.h"
 #include "mozilla/AlreadyAddRefed.h"
+#include "mozilla/MozPromise.h"
 #include "mozilla/RefPtr.h"
+#include "mozilla/dom/RTCCertService.h"
+#include "mozilla/dom/SubtleCryptoBinding.h"
 #include "nsCycleCollectionParticipant.h"
+#include "nsICancelableRunnable.h"
 #include "nsIGlobalObject.h"
 #include "nsISupports.h"
 #include "nsWrapperCache.h"
@@ -42,6 +46,27 @@ class ObjectOrString;
 class Promise;
 struct RTCDtlsFingerprint;
 
+class RTCCertificateMetadata {
+ public:
+  RTCCertificateMetadata();
+
+  nsresult Init(JSContext* aCx, nsCString aOrigin,
+                const ObjectOrString& aAlgorithm, SSLKEAType* aAuthType,
+                ErrorResult& aRv);
+  RefPtr<RTCCertificatePromise> Generate(RTCCertService* aCertService);
+
+ private:
+  nsTArray<uint8_t> mParam;
+  PRTime mExpires;
+  SECOidTag mSignatureAlg;
+  UniquePLArenaPool mArena;
+  CK_MECHANISM_TYPE mMechanism;
+  PK11RSAGenParams mRsaParams;
+  nsString mNamedCurve;
+  nsString mAlgName;
+  nsCString mOrigin;
+};
+
 class RTCCertificate final : public nsISupports, public nsWrapperCache {
  public:
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
@@ -53,9 +78,6 @@ class RTCCertificate final : public nsISupports, public nsWrapperCache {
       ErrorResult& aRv, JS::Compartment* aCompartment = nullptr);
 
   explicit RTCCertificate(nsIGlobalObject* aGlobal);
-  RTCCertificate(nsIGlobalObject* aGlobal, SECKEYPrivateKey* aPrivateKey,
-                 CERTCertificate* aCertificate, SSLKEAType aAuthType,
-                 PRTime aExpires);
 
   nsIGlobalObject* GetParentObject() const { return mGlobal; }
   virtual JSObject* WrapObject(JSContext* aCx,
@@ -78,20 +100,28 @@ class RTCCertificate final : public nsISupports, public nsWrapperCache {
       JSStructuredCloneReader* aReader);
 
  private:
-  ~RTCCertificate() = default;
+  // TODO: cert ref counts? -> clone = remove?
+  ~RTCCertificate();
   void operator=(const RTCCertificate&) = delete;
   RTCCertificate(const RTCCertificate&) = delete;
 
+  already_AddRefed<Promise> Generate(const GlobalObject& aGlobal,
+                                     const ObjectOrString& aOptions,
+                                     ErrorResult& aRv);
+
   bool ReadCertificate(JSStructuredCloneReader* aReader);
-  bool ReadPrivateKey(JSStructuredCloneReader* aReader);
+  bool ReadCertificateFingerprint(JSStructuredCloneReader* aReader);
   bool WriteCertificate(JSStructuredCloneWriter* aWriter) const;
-  bool WritePrivateKey(JSStructuredCloneWriter* aWriter) const;
+  bool WriteCertificateFingerprint(JSStructuredCloneWriter* aWriter) const;
 
   RefPtr<nsIGlobalObject> mGlobal;
-  UniqueSECKEYPrivateKey mPrivateKey;
+  CertFingerprint mCertFingerprint;
+
+  RTCCertificateMetadata mData;
+
   UniqueCERTCertificate mCertificate;
-  SSLKEAType mAuthType;
-  PRTime mExpires;
+  SSLKEAType mAuthType = ssl_kea_null;
+  PRTime mExpires = 0;
   nsTArray<RTCDtlsFingerprint> mFingerprints;
 };
 

@@ -12,6 +12,7 @@
 #include "ScopedNSSTypes.h"
 #include "m_cpp_utils.h"
 #include "mozilla/RefPtr.h"
+#include "mozilla/dom/RTCCertCache.h"
 #include "nsISupportsImpl.h"
 #include "nsString.h"
 #include "nsTArray.h"
@@ -58,14 +59,15 @@ class DtlsIdentity final {
       : private_key_(std::move(privkey)),
         cert_(std::move(cert)),
         auth_type_(authType) {}
+  DtlsIdentity(dom::CertFingerprint certFingerprint, SSLKEAType authType)
+      : cert_fingerprint_(certFingerprint), auth_type_(authType) {}
 
   // Allows serialization/deserialization; cannot write IPC serialization code
   // directly for DtlsIdentity, since IPC-able types need to be constructable
   // on the stack.
-  nsresult Serialize(nsTArray<uint8_t>* aKeyDer, nsTArray<uint8_t>* aCertDer);
-  static RefPtr<DtlsIdentity> Deserialize(const nsTArray<uint8_t>& aKeyDer,
-                                          const nsTArray<uint8_t>& aCertDer,
-                                          SSLKEAType authType);
+  nsTArray<uint8_t> GetCertFingerprint();
+  static RefPtr<DtlsIdentity> FromCertFingerprint(
+      const nsTArray<uint8_t>& certFingerprint, SSLKEAType authType);
 
   // This is only for use in tests, or for external linkage.  It makes a (bad)
   // instance of this class.
@@ -73,15 +75,15 @@ class DtlsIdentity final {
 
   // These don't create copies or transfer ownership. If you want these to live
   // on, make a copy.
-  const UniqueCERTCertificate& cert() const { return cert_; }
-  const UniqueSECKEYPrivateKey& privkey() const { return private_key_; }
+  const UniqueCERTCertificate& cert();
+  const UniqueSECKEYPrivateKey& privkey();
   // Note: this uses SSLKEAType because that is what the libssl API requires.
   // This is a giant confusing mess, but libssl indexes certificates based on a
   // key exchange type, not authentication type (as you might have reasonably
   // expected).
   SSLKEAType auth_type() const { return auth_type_; }
 
-  nsresult ComputeFingerprint(DtlsDigest* digest) const;
+  nsresult ComputeFingerprint(DtlsDigest* digest);
   static nsresult ComputeFingerprint(const UniqueCERTCertificate& cert,
                                      DtlsDigest* digest);
 
@@ -91,9 +93,10 @@ class DtlsIdentity final {
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(DtlsIdentity)
 
  private:
-  ~DtlsIdentity() = default;
+  ~DtlsIdentity() { dom::RTCCertCache::ClearExpiredCertificates(); };
   DISALLOW_COPY_ASSIGN(DtlsIdentity);
 
+  dom::CertFingerprint cert_fingerprint_;
   UniqueSECKEYPrivateKey private_key_;
   UniqueCERTCertificate cert_;
   SSLKEAType auth_type_;

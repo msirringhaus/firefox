@@ -9,6 +9,7 @@
 #ifdef MOZ_WEBRTC
 #  include "mozilla/dom/MediaTransportParent.h"
 #endif
+#include "mozilla/dom/RTCCertServiceParent.h"
 #include "mozilla/ipc/BackgroundParent.h"
 #include "mozilla/ipc/Endpoint.h"
 #include "SocketProcessChild.h"
@@ -27,6 +28,8 @@ SocketProcessBridgeParent::SocketProcessBridgeParent(ProcessId aId) : mId(aId) {
 
 SocketProcessBridgeParent::~SocketProcessBridgeParent() {
   LOG(("DESTRUCT SocketProcessBridgeParent::SocketProcessBridgeParent\n"));
+  // Clear all stale RTCCertificates, otherwise NSS_Shutdown fails.
+  dom::RTCCertCache::Clear();
 }
 
 mozilla::ipc::IPCResult SocketProcessBridgeParent::RecvInitBackgroundDataBridge(
@@ -82,6 +85,37 @@ mozilla::ipc::IPCResult SocketProcessBridgeParent::RecvInitMediaTransport(
   return IPC_OK();
 }
 #endif
+
+mozilla::ipc::IPCResult
+SocketProcessBridgeParent::RecvInitRTCCertServiceTransaction(
+    mozilla::ipc::Endpoint<mozilla::dom::PRTCCertServiceTransactionParent>&&
+        aEndpoint) {
+  LOG(("SocketProcessBridgeParent::RecvInitRTCCertServiceTransaction\n"));
+
+  if (!aEndpoint.IsValid()) {
+    return IPC_FAIL(this, "Invalid endpoint");
+  }
+
+  if (!mMediaTransportTaskQueue) {
+    nsCOMPtr<nsISerialEventTarget> transportQueue;
+    if (NS_FAILED(NS_CreateBackgroundTaskQueue(
+            "MediaTransport", getter_AddRefs(transportQueue)))) {
+      return IPC_FAIL(this, "NS_CreateBackgroundTaskQueue failed");
+    }
+
+    mMediaTransportTaskQueue = std::move(transportQueue);
+  }
+
+  mMediaTransportTaskQueue->Dispatch(
+      NS_NewRunnableFunction("BackgroundDataBridgeParent::Bind",
+                             [endpoint = std::move(aEndpoint)]() mutable {
+                               RefPtr<dom::RTCCertServiceParent> actor =
+                                   new dom::RTCCertServiceParent();
+                               endpoint.Bind(actor);
+                             }));
+
+  return IPC_OK();
+}
 
 void SocketProcessBridgeParent::ActorDestroy(ActorDestroyReason aReason) {
   // See bug 1846478. We might be able to remove this dispatch.

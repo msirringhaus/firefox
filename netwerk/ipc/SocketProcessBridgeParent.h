@@ -29,6 +29,9 @@ class SocketProcessBridgeParent final : public PSocketProcessBridgeParent {
       Endpoint<PMediaTransportParent>&& aEndpoint);
 #endif
 
+  mozilla::ipc::IPCResult RecvInitRTCCertServiceTransaction(
+      Endpoint<PRTCCertServiceTransactionParent>&& aEndpoint);
+
   void ActorDestroy(ActorDestroyReason aReason) override;
 
  private:
