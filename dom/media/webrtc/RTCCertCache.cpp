@@ -17,10 +17,42 @@ static mozilla::LazyLogModule gCertLog("RTCCertCache");
 
 namespace mozilla::dom {
 
-bool RTCCertCacheData::Insert(nsCString&& aOrigin,
+void RTCCertCacheData::Insert(nsCString&& aOrigin,
                               GeneratedCertificate&& aCert) {
-  if (CacheLimitsReached(aOrigin)) {
-    return false;
+  bool globalLimitReached = mCertCache.Count() >= sMaxGlobalCerts;
+  bool originLimitReached =
+      mOriginCount.MaybeGet(aOrigin).valueOr(0) >= sMaxCertsPerOrigin;
+
+  if (globalLimitReached || originLimitReached) {
+    // Maybe we can get away with clearing old certs
+    ClearExpiredCertificates();
+  }
+
+  // Check limits again
+  globalLimitReached = mCertCache.Count() >= sMaxGlobalCerts;
+  originLimitReached =
+      mOriginCount.MaybeGet(aOrigin).valueOr(0) >= sMaxCertsPerOrigin;
+
+  if (globalLimitReached) {
+    // Remove the oldest cert (will also remove it from mGlobalOrder)
+    Remove(mGlobalOrder[0]);
+  }
+
+  if (originLimitReached) {
+    // Find and remove the oldest certificate belonging to this origin.
+    for (size_t ii = 0; ii < mGlobalOrder.Length(); ++ii) {
+      const CertFingerprint& fp = mGlobalOrder[ii];
+      if (auto entry = mCertCache.Lookup(fp)) {
+        if (entry.Data().mOrigin.Equals(aOrigin)) {
+          Remove(fp);
+          MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
+                  ("RTCCertCache::CacheCert "
+                   "Removing element: %s for origin: %s. mOriginCount = %i\n",
+                   fp.Dump().get(), aOrigin.get(), mOriginCount.Get(aOrigin)));
+          break;
+        }
+      }
+    }
   }
 
   MOZ_LOG(
@@ -34,25 +66,15 @@ bool RTCCertCacheData::Insert(nsCString&& aOrigin,
       // Only increment the origin counter if this is a new entry
       mOriginCount.LookupOrInsert(aOrigin, 0)++;
       entry.Insert(RTCCertCacheItem(std::move(aOrigin), std::move(aCert)));
+      mGlobalOrder.AppendElement(fingerprint);
     } else {
+      // If the cert already exists, we update it.
       entry.Data() = RTCCertCacheItem(std::move(aOrigin), std::move(aCert));
+      // To maintain FIFO behavior, we should move it to the back of the line.
+      mGlobalOrder.RemoveElement(fingerprint);
+      mGlobalOrder.AppendElement(fingerprint);
     }
   });
-
-  return true;
-}
-
-bool RTCCertCacheData::CacheLimitsReached(const nsCString& aOrigin) {
-  if (mCertCache.Count() >= RTCCertCacheData::sMaxGlobalCerts) {
-    return true;
-  }
-
-  if (mOriginCount.MaybeGet(aOrigin).valueOr(0) >=
-      RTCCertCacheData::sMaxCertsPerOrigin) {
-    return true;
-  }
-
-  return false;
 }
 
 void RTCCertCacheData::Remove(const CertFingerprint aCertFingerprint) {
@@ -68,6 +90,7 @@ void RTCCertCacheData::Remove(const CertFingerprint aCertFingerprint) {
         count.Remove();
       }
     }
+    mGlobalOrder.RemoveElement(aCertFingerprint);
     item.Remove();
   }
 }
@@ -89,6 +112,7 @@ void RTCCertCacheData::Clear() {
            mCertCache.Count()));
   mCertCache.Clear();
   mOriginCount.Clear();
+  mGlobalOrder.Clear();
 }
 
 void RTCCertCacheData::ClearExpiredCertificates() {
@@ -104,6 +128,7 @@ void RTCCertCacheData::ClearExpiredCertificates() {
           countEntry.Remove();
         }
       }
+      mGlobalOrder.RemoveElement(item.mCert.mCertFingerprint);
       return true;
     }
     return false;
@@ -117,7 +142,7 @@ void RTCCertCacheData::ClearExpiredCertificates() {
 MOZ_RUNINIT mozilla::StaticDataMutex<RTCCertCacheData> RTCCertCache::sCertCache{
     "RTCCertCache::sCertCache"};
 
-bool RTCCertCache::CacheCert(nsCString&& aOrigin,
+void RTCCertCache::CacheCert(nsCString&& aOrigin,
                              GeneratedCertificate&& aCert) {
   auto certCache = RTCCertCache::sCertCache.Lock();
 
@@ -143,11 +168,6 @@ void RTCCertCache::Clear() {
 void RTCCertCache::ClearExpiredCertificates() {
   auto certCache = RTCCertCache::sCertCache.Lock();
   (*certCache).ClearExpiredCertificates();
-}
-
-bool RTCCertCache::CacheLimitsReached(const nsCString& aOrigin) {
-  auto certCache = RTCCertCache::sCertCache.Lock();
-  return (*certCache).CacheLimitsReached(aOrigin);
 }
 
 }  // namespace mozilla::dom

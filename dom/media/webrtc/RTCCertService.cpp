@@ -175,20 +175,6 @@ void RTCCertServiceLocal::Initialize() {
 RefPtr<RTCCertificatePromise> RTCCertServiceLocal::GenerateCertificate(
     nsCString& aOrigin, nsTArray<uint8_t>& aParam, PRTime aExpires,
     uint32_t aMechanism, uint32_t aSignatureAlg) {
-  // First clear all certs that may have expired already to make room for a new
-  // cert
-  RTCCertCache::ClearExpiredCertificates();
-
-  // Check if this origin is allowed to cache more certs.
-  // Note, this is not a guarantee the insert will work,
-  // as this is not an atomic operation and the actual
-  // insertion could still fail. We check here first, to
-  // avoid running the costly GenerateCertificate() first
-  // in a hypothetical DoS-scenario.
-  if (RTCCertCache::CacheLimitsReached(aOrigin)) {
-    return RTCCertificatePromise::CreateAndReject(NS_ERROR_FAILURE, __func__);
-  }
-
   RefPtr<RTCCertificateGenerator> gen = new RTCCertificateGenerator();
   RefPtr<RTCCertificatePromise> promise =
       gen->Generate(aParam, aExpires, aMechanism,
@@ -200,14 +186,9 @@ RefPtr<RTCCertificatePromise> RTCCertServiceLocal::GenerateCertificate(
                     UniqueCERTCertificate(
                         CERT_DupCertificate(genCert.mCertificate.get())),
                     genCert.mExpires, genCert.mCertFingerprint);
-                if (RTCCertCache::CacheCert(std::move(aOrigin),
-                                            std::move(genCert))) {
-                  return RTCCertificatePromise::CreateAndResolve(
-                      std::move(data), __func__);
-                } else {
-                  return RTCCertificatePromise::CreateAndReject(
-                      NS_ERROR_FAILURE, __func__);
-                }
+                RTCCertCache::CacheCert(std::move(aOrigin), std::move(genCert));
+                return RTCCertificatePromise::CreateAndResolve(std::move(data),
+                                                               __func__);
               },
               [](const nsresult& aError) {
                 return RTCCertificatePromise::CreateAndReject(aError, __func__);

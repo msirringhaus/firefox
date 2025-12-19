@@ -29,8 +29,7 @@ class RTCCertCacheData {
   };
 
  public:
-  bool Insert(nsCString&& aOrigin, GeneratedCertificate&& aCert);
-  bool CacheLimitsReached(const nsCString& aOrigin);
+  void Insert(nsCString&& aOrigin, GeneratedCertificate&& aCert);
   void Remove(const CertFingerprint aCertFingerprint);
   GeneratedCertificate* Get(const CertFingerprint aCertFingerprint);
   void Clear();
@@ -39,22 +38,22 @@ class RTCCertCacheData {
  protected:
   nsTHashMap<CertFingerprintHashKey, RTCCertCacheItem> mCertCache;
   nsTHashMap<nsCStringHashKey, uint32_t> mOriginCount;
+  nsTArray<CertFingerprint> mGlobalOrder;
 
   // Hard limits
-  static const size_t sMaxCertsPerOrigin = 200;
-  static const size_t sMaxGlobalCerts = 1000;
+  static const uint64_t sMaxCertsPerOrigin = 200;
+  static const uint64_t sMaxGlobalCerts = 1000;
 };
 
 class RTCCertCache {
  public:
   // Returns true on success and false, if either the per-origin
-  static bool CacheCert(nsCString&& aOrigin, GeneratedCertificate&& aCert);
+  static void CacheCert(nsCString&& aOrigin, GeneratedCertificate&& aCert);
   static GeneratedCertificate* LookupCert(
       const CertFingerprint aCertFingerprint);
   static void RemoveCert(const CertFingerprint aCertFingerprint);
   static void Clear();
   static void ClearExpiredCertificates();
-  static bool CacheLimitsReached(const nsCString& aOrigin);
 
  private:
   static mozilla::StaticDataMutex<RTCCertCacheData> sCertCache;
