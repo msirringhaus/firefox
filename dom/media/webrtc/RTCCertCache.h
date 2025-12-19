@@ -20,7 +20,30 @@ struct GeneratedCertificate {
   PRTime mExpires = 0;
 };
 
-class RTCCertCacheData;
+class RTCCertCacheData {
+  struct RTCCertCacheItem {
+    RTCCertCacheItem(nsCString&& mOrigin, GeneratedCertificate&& mCert)
+        : mOrigin(std::move(mOrigin)), mCert(std::move(mCert)) {}
+    nsCString mOrigin;
+    GeneratedCertificate mCert;
+  };
+
+ public:
+  bool Insert(nsCString&& aOrigin, GeneratedCertificate&& aCert);
+  bool CacheLimitsReached(const nsCString& aOrigin);
+  void Remove(const CertFingerprint aCertFingerprint);
+  GeneratedCertificate* Get(const CertFingerprint aCertFingerprint);
+  void Clear();
+  void ClearExpiredCertificates();
+
+ protected:
+  nsTHashMap<CertFingerprintHashKey, RTCCertCacheItem> mCertCache;
+  nsTHashMap<nsCStringHashKey, uint32_t> mOriginCount;
+
+  // Hard limits
+  static const size_t sMaxCertsPerOrigin = 200;
+  static const size_t sMaxGlobalCerts = 1000;
+};
 
 class RTCCertCache {
  public:

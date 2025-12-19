@@ -17,118 +17,102 @@ static mozilla::LazyLogModule gCertLog("RTCCertCache");
 
 namespace mozilla::dom {
 
-class RTCCertCacheData {
-  struct RTCCertCacheItem {
-    RTCCertCacheItem(nsCString&& mOrigin, GeneratedCertificate&& mCert)
-        : mOrigin(std::move(mOrigin)), mCert(std::move(mCert)) {}
-    nsCString mOrigin;
-    GeneratedCertificate mCert;
-  };
-
- public:
-  bool Insert(nsCString&& aOrigin, GeneratedCertificate&& aCert) {
-    if (CacheLimitsReached(aOrigin)) {
-      return false;
-    }
-
-    MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
-            ("RTCCertCache::CacheCert (Elements before insertion: %i). "
-             "Inserting: %s for origin: %s\n",
-             mCertCache.Count(), aCert.mCertFingerprint.Dump().get(),
-             aOrigin.get()));
-    const auto fingerprint = aCert.mCertFingerprint;
-    mCertCache.WithEntryHandle(fingerprint, [&](auto&& entry) {
-      if (!entry) {
-        // Only increment the origin counter if this is a new entry
-        mOriginCount.LookupOrInsert(aOrigin, 0)++;
-        entry.Insert(RTCCertCacheItem(std::move(aOrigin), std::move(aCert)));
-      } else {
-        entry.Data() = RTCCertCacheItem(std::move(aOrigin), std::move(aCert));
-      }
-    });
-
-    return true;
-  }
-
-  bool CacheLimitsReached(const nsCString& aOrigin) {
-    if (mCertCache.Count() >= RTCCertCacheData::sMaxGlobalCerts) {
-      return true;
-    }
-
-    if (mOriginCount.MaybeGet(aOrigin).valueOr(0) >=
-        RTCCertCacheData::sMaxCertsPerOrigin) {
-      return true;
-    }
-
+bool RTCCertCacheData::Insert(nsCString&& aOrigin,
+                              GeneratedCertificate&& aCert) {
+  if (CacheLimitsReached(aOrigin)) {
     return false;
   }
 
-  void Remove(const CertFingerprint aCertFingerprint) {
-    MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
-            ("RTCCertCache::RemoveCert (Elements before removal: %i). "
-             "Removing: %s\n",
-             mCertCache.Count(), aCertFingerprint.Dump().get()));
-    if (auto item = mCertCache.Lookup(aCertFingerprint)) {
-      // Before we can remove the item itself, we have to decrease
-      // the origin counter associated with it
-      if (auto count = mOriginCount.Lookup(item.Data().mOrigin)) {
-        if (--count.Data() == 0) {
-          count.Remove();
+  MOZ_LOG(
+      gCertLog, mozilla::LogLevel::Info,
+      ("RTCCertCache::CacheCert (Elements before insertion: %i). "
+       "Inserting: %s for origin: %s\n",
+       mCertCache.Count(), aCert.mCertFingerprint.Dump().get(), aOrigin.get()));
+  const auto fingerprint = aCert.mCertFingerprint;
+  mCertCache.WithEntryHandle(fingerprint, [&](auto&& entry) {
+    if (!entry) {
+      // Only increment the origin counter if this is a new entry
+      mOriginCount.LookupOrInsert(aOrigin, 0)++;
+      entry.Insert(RTCCertCacheItem(std::move(aOrigin), std::move(aCert)));
+    } else {
+      entry.Data() = RTCCertCacheItem(std::move(aOrigin), std::move(aCert));
+    }
+  });
+
+  return true;
+}
+
+bool RTCCertCacheData::CacheLimitsReached(const nsCString& aOrigin) {
+  if (mCertCache.Count() >= RTCCertCacheData::sMaxGlobalCerts) {
+    return true;
+  }
+
+  if (mOriginCount.MaybeGet(aOrigin).valueOr(0) >=
+      RTCCertCacheData::sMaxCertsPerOrigin) {
+    return true;
+  }
+
+  return false;
+}
+
+void RTCCertCacheData::Remove(const CertFingerprint aCertFingerprint) {
+  MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
+          ("RTCCertCache::RemoveCert (Elements before removal: %i). "
+           "Removing: %s\n",
+           mCertCache.Count(), aCertFingerprint.Dump().get()));
+  if (auto item = mCertCache.Lookup(aCertFingerprint)) {
+    // Before we can remove the item itself, we have to decrease
+    // the origin counter associated with it
+    if (auto count = mOriginCount.Lookup(item.Data().mOrigin)) {
+      if (--count.Data() == 0) {
+        count.Remove();
+      }
+    }
+    item.Remove();
+  }
+}
+
+GeneratedCertificate* RTCCertCacheData::Get(
+    const CertFingerprint aCertFingerprint) {
+  MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
+          ("RTCCertCache::LookupCert (Elements: %i). Looking up: %s\n",
+           mCertCache.Count(), aCertFingerprint.Dump().get()));
+  if (auto entry = mCertCache.Lookup(aCertFingerprint)) {
+    return &entry.Data().mCert;
+  }
+  return nullptr;
+}
+
+void RTCCertCacheData::Clear() {
+  MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
+          ("RTCCertCache::Clear (Elements before clearing: %i)\n",
+           mCertCache.Count()));
+  mCertCache.Clear();
+  mOriginCount.Clear();
+}
+
+void RTCCertCacheData::ClearExpiredCertificates() {
+  unsigned int beforeClearing = mCertCache.Count();
+  PRTime now = PR_Now();
+  mCertCache.RemoveIf([this, now](auto& aIter) {
+    const RTCCertCacheItem& item = aIter.Data();
+
+    if (item.mCert.mExpires < now) {
+      // Also decrement / remove origin counter for this expired cert
+      if (auto countEntry = mOriginCount.Lookup(item.mOrigin)) {
+        if (--countEntry.Data() == 0) {
+          countEntry.Remove();
         }
       }
-      item.Remove();
+      return true;
     }
-  }
-
-  GeneratedCertificate* Get(const CertFingerprint aCertFingerprint) {
-    MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
-            ("RTCCertCache::LookupCert (Elements: %i). Looking up: %s\n",
-             mCertCache.Count(), aCertFingerprint.Dump().get()));
-    if (auto entry = mCertCache.Lookup(aCertFingerprint)) {
-      return &entry.Data().mCert;
-    }
-    return nullptr;
-  }
-
-  void Clear() {
-    MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
-            ("RTCCertCache::Clear (Elements before clearing: %i)\n",
-             mCertCache.Count()));
-    mCertCache.Clear();
-    mOriginCount.Clear();
-  }
-
-  void ClearExpiredCertificates() {
-    unsigned int beforeClearing = mCertCache.Count();
-    PRTime now = PR_Now();
-    mCertCache.RemoveIf([this, now](auto& aIter) {
-      const RTCCertCacheItem& item = aIter.Data();
-
-      if (item.mCert.mExpires < now) {
-        // Also decrement / remove origin counter for this expired cert
-        if (auto countEntry = mOriginCount.Lookup(item.mOrigin)) {
-          if (--countEntry.Data() == 0) {
-            countEntry.Remove();
-          }
-        }
-        return true;
-      }
-      return false;
-    });
-    MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
-            ("RTCCertCache::ClearExpiredCertificates (Elements before "
-             "clearing: %i, vs. after: %i)\n",
-             beforeClearing, mCertCache.Count()));
-  }
-
- private:
-  nsTHashMap<CertFingerprintHashKey, RTCCertCacheItem> mCertCache;
-  nsTHashMap<nsCStringHashKey, uint32_t> mOriginCount;
-
-  // Hard limits
-  static const size_t sMaxCertsPerOrigin = 200;
-  static const size_t sMaxGlobalCerts = 1000;
-};
+    return false;
+  });
+  MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
+          ("RTCCertCache::ClearExpiredCertificates (Elements before "
+           "clearing: %i, vs. after: %i)\n",
+           beforeClearing, mCertCache.Count()));
+}
 
 MOZ_RUNINIT mozilla::StaticDataMutex<RTCCertCacheData> RTCCertCache::sCertCache{
     "RTCCertCache::sCertCache"};
