@@ -5,6 +5,9 @@
 #include "MediaTransportHandler.h"
 
 #include "MediaTransportHandlerIPC.h"
+#include "RTCCertStore.h"
+#include "mozilla/dom/RTCCertServiceData.h"
+#include "mozilla/glue/Debug.h"
 #include "transport/nricemediastream.h"
 #include "transport/nriceresolver.h"
 #include "transport/sigslot.h"
@@ -175,6 +178,7 @@ class MediaTransportHandlerSTS : public MediaTransportHandler,
   RefPtr<NrIceCtx> mIceCtx;
   RefPtr<NrIceResolver> mDNSResolver;
   std::map<std::string, Transport> mTransports;
+  std::map<std::string, dom::CertFingerprint> mCertFingerprints;
   bool mObfuscateHostAddresses = false;
   bool mTurnDisabled = false;
   uint32_t mMinDtlsVersion = 0;
@@ -691,6 +695,11 @@ void MediaTransportHandlerSTS::Shutdown_s() {
   }
   mIceCtx = nullptr;
   mDNSResolver = nullptr;
+  for (const auto& [transportId, fingerprint] : mCertFingerprints) {
+    printf_stderr("----------->> STS: Removing cert: %s\n", fingerprint.Dump().get());
+    dom::RTCCertStore::RemoveCert(fingerprint);
+  }
+  mCertFingerprints.clear();
 }
 
 void MediaTransportHandlerSTS::Destroy() {
@@ -871,6 +880,7 @@ void MediaTransportHandlerSTS::ActivateTransport(
         }
 
         mTransports[aTransportId] = transport;
+        mCertFingerprints[aTransportId] = dom::CertFingerprint(aCertFingerprint);
       },
       [](const std::string& aError) {});
 }

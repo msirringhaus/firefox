@@ -28,32 +28,32 @@ void RTCCertStoreData::Insert(nsCString&& aOrigin,
     ClearExpiredCertificates();
   }
 
-  // Check limits again
-  globalLimitReached = mCertStore.Count() >= sMaxGlobalCerts;
-  originLimitReached =
-      mOriginCount.MaybeGet(aOrigin).valueOr(0) >= sMaxCertsPerOrigin;
+  // // Check limits again
+  // globalLimitReached = mCertStore.Count() >= sMaxGlobalCerts;
+  // originLimitReached =
+  //     mOriginCount.MaybeGet(aOrigin).valueOr(0) >= sMaxCertsPerOrigin;
 
-  if (globalLimitReached) {
-    // Remove the oldest cert (will also remove it from mGlobalOrder)
-    Remove(mGlobalOrder[0]);
-  }
+  // if (globalLimitReached) {
+  //   // Remove the oldest cert (will also remove it from mGlobalOrder)
+  //   Remove(mGlobalOrder[0]);
+  // }
 
-  if (originLimitReached) {
-    // Find and remove the oldest certificate belonging to this origin.
-    for (size_t ii = 0; ii < mGlobalOrder.Length(); ++ii) {
-      const CertFingerprint& fp = mGlobalOrder[ii];
-      if (auto entry = mCertStore.Lookup(fp)) {
-        if (entry.Data().mOrigin.Equals(aOrigin)) {
-          Remove(fp);
-          MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
-                  ("RTCCertStore::StoreCert "
-                   "Removing element: %s for origin: %s. mOriginCount = %i\n",
-                   fp.Dump().get(), aOrigin.get(), mOriginCount.Get(aOrigin)));
-          break;
-        }
-      }
-    }
-  }
+  // if (originLimitReached) {
+  //   // Find and remove the oldest certificate belonging to this origin.
+  //   for (size_t ii = 0; ii < mGlobalOrder.Length(); ++ii) {
+  //     const CertFingerprint& fp = mGlobalOrder[ii];
+  //     if (auto entry = mCertStore.Lookup(fp)) {
+  //       if (entry.Data().mOrigin.Equals(aOrigin)) {
+  //         Remove(fp);
+  //         MOZ_LOG(gCertLog, mozilla::LogLevel::Info,
+  //                 ("RTCCertStore::StoreCert "
+  //                  "Removing element: %s for origin: %s. mOriginCount = %i\n",
+  //                  fp.Dump().get(), aOrigin.get(), mOriginCount.Get(aOrigin)));
+  //         break;
+  //       }
+  //     }
+  //   }
+  // }
 
   MOZ_LOG(
       gCertLog, mozilla::LogLevel::Info,

@@ -99,6 +99,10 @@ class RTCCertificate final : public nsISupports, public nsWrapperCache {
       JSContext* aCx, nsIGlobalObject* aGlobal,
       JSStructuredCloneReader* aReader);
 
+  CertFingerprint GetCertFingerprint() {
+    return mCertFingerprint;
+  }
+
  private:
   // TODO: cert ref counts? -> clone = remove?
   ~RTCCertificate();

@@ -32,7 +32,9 @@
 #include "mozilla/IntegerPrintfMacros.h"
 #include "mozilla/Sprintf.h"
 #include "mozilla/StaticPrefs_media.h"
+#include "mozilla/dom/RTCCertService.h"
 #include "mozilla/glean/DomMediaWebrtcMetrics.h"
+#include "mozilla/glue/Debug.h"
 #include "mozilla/media/MediaUtils.h"
 #include "nsEffectiveTLDService.h"
 #include "nsFmtString.h"
@@ -2431,6 +2433,13 @@ PeerConnectionImpl::Close() {
 
   mOperations.Clear();
 
+  if (mCertificate) {
+    auto *rtccertservice = RTCCertService::GetInstance();
+    if (rtccertservice) {
+      printf_stderr("-------------------->>> Removing cert: %s\n", mCertificate->GetCertFingerprint().Dump().get());
+      RTCCertService::GetInstance()->RemoveCertificate(mCertificate->GetCertFingerprint());
+    }
+  }
   // Uncount this connection as active on the inner window upon close.
   if (mWindow && mActiveOnWindow) {
     mWindow->RemovePeerConnection();
