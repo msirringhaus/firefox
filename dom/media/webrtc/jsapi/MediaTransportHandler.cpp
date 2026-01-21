@@ -35,6 +35,7 @@
 #include <string>
 #include <vector>
 
+#include "RTCCertStore.h"
 #include "mozilla/PublicSSL.h"  // For psm::InitializeCipherSuite
 #include "mozilla/dom/RTCStatsReportBinding.h"
 #include "nsDNSService2.h"
@@ -175,6 +176,7 @@ class MediaTransportHandlerSTS : public MediaTransportHandler,
   RefPtr<NrIceCtx> mIceCtx;
   RefPtr<NrIceResolver> mDNSResolver;
   std::map<std::string, Transport> mTransports;
+  std::map<std::string, RefPtr<dom::SharedCertificate>> mUsedCertificates;
   bool mObfuscateHostAddresses = false;
   bool mTurnDisabled = false;
   uint32_t mMinDtlsVersion = 0;
@@ -681,6 +683,15 @@ void MediaTransportHandlerSTS::Shutdown_s() {
   // the close_notify alerts have a chance to be sent as the
   // TransportFlow destructors execute.
   mTransports.clear();
+  // We are done with the certificates, but we have to
+  // touch all of them, so we know when they were last used 
+  for (auto& cert : mUsedCertificates) {
+      if (cert.second) {
+          cert.second->Touch();
+      }
+  }
+  mUsedCertificates.clear();
+
   if (mIceCtx) {
     NrIceStats stats = mIceCtx->Destroy();
     CSFLogDebug(LOGTAG,
@@ -869,8 +880,11 @@ void MediaTransportHandlerSTS::ActivateTransport(
           // components are 1-indexed
           stream->DisableComponent(2);
         }
-
+        
         mTransports[aTransportId] = transport;
+        // We hold on to the cert we are using for this transport, to mark it
+        // as being in use.
+        mUsedCertificates[aTransportId] = dom::RTCCertStore::LookupCert(dom::CertFingerprint(aCertFingerprint));
       },
       [](const std::string& aError) {});
 }

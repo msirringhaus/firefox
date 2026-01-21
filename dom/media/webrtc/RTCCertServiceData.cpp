@@ -53,11 +53,11 @@ CertData::CertData(const CertDataIPC* aCertDataIPC) {
   mFingerprint = CertFingerprint(aCertDataIPC->mFingerprint);
 }
 
-CertData::CertData(const GeneratedCertificate* aCertData) {
+CertData::CertData(const GeneratedCertificate &aCertData) {
   mCertificate =
-      UniqueCERTCertificate(CERT_DupCertificate(aCertData->mCertificate.get()));
-  mExpires = aCertData->mExpires;
-  mFingerprint = aCertData->mCertFingerprint;
+      UniqueCERTCertificate(CERT_DupCertificate(aCertData.mCertificate.get()));
+  mExpires = aCertData.mExpires;
+  mFingerprint = aCertData.mCertFingerprint;
 }
 
 void SerializeRSAParam(nsTArray<uint8_t>* aParams,

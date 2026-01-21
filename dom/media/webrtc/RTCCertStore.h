@@ -7,8 +7,13 @@
 #ifndef mozilla_dom_RTCCertStore_h
 #define mozilla_dom_RTCCertStore_h
 
+#include <cstdint>
 #include "mozilla/DataMutex.h"
 #include "mozilla/dom/RTCCertServiceData.h"
+#include "prtime.h"
+
+// gtest class
+class TestRTCCertStoreData;
 
 namespace mozilla::dom {
 
@@ -20,35 +25,67 @@ struct GeneratedCertificate {
   PRTime mExpires = 0;
 };
 
-class RTCCertStoreData {
-  struct RTCCertStoreItem {
-    RTCCertStoreItem(nsCString&& aOrigin, GeneratedCertificate&& aCert)
-        : mOrigin(std::move(aOrigin)), mCert(std::move(aCert)) {}
-    nsCString mOrigin;
-    GeneratedCertificate mCert;
-  };
+class SharedCertificate {
+  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(SharedCertificate);
+  public:
+    SharedCertificate(nsCString&& aOrigin, GeneratedCertificate&& aCert)
+        : mOrigin(std::move(aOrigin)), mCert(std::move(aCert)), mLastTouched(PR_Now()) {}
 
+    bool IsInUse() const {
+        return mRefCnt > 1;
+    }
+
+    PRTime LastTouched() {
+      return mLastTouched;
+    }
+
+    void Touch() {
+      mLastTouched = PR_Now();
+    }
+
+    const GeneratedCertificate & Cert() {
+      return mCert;
+    }
+
+    // ONLY FOR TESTING!
+    void SetLastTouched(PRTime aTime) {
+      mLastTouched = aTime;
+    }
+
+    // ONLY FOR TESTING!
+    uint64_t GetRefCnt() {
+      return mRefCnt;
+    }
+
+  protected:
+    nsCString mOrigin; // TODO: Do we need this?
+    GeneratedCertificate mCert;
+    // Most of this class is read-only, but consumers need a
+    // thread-safe way to update when they interact with this
+    // certificate, to be able to identify idle certs and remove
+    // them when doing garbage collection.
+    std::atomic<PRTime> mLastTouched;
+  private:
+    ~SharedCertificate() = default;
+};
+
+class RTCCertStoreData {
  public:
   void Insert(nsCString&& aOrigin, GeneratedCertificate&& aCert);
   void Remove(const CertFingerprint aCertFingerprint);
-  GeneratedCertificate* Get(const CertFingerprint aCertFingerprint) const;
+  RefPtr<SharedCertificate> Get(const CertFingerprint aCertFingerprint) const;
   void Clear();
   void ClearExpiredCertificates();
 
  protected:
-  nsTHashMap<CertFingerprintHashKey, RTCCertStoreItem> mCertStore;
-  nsTHashMap<nsCStringHashKey, uint32_t> mOriginCount;
-  nsTArray<CertFingerprint> mGlobalOrder;
-
-  // Hard limits
-  static const uint64_t sMaxCertsPerOrigin = 200;
-  static const uint64_t sMaxGlobalCerts = 1000;
+  nsTHashMap<CertFingerprintHashKey, RefPtr<SharedCertificate>> mCertStore;
+  const PRTime kGracePeriod = 5 * 60 * PRTime(PR_USEC_PER_SEC); // 5 minutes
 };
 
 class RTCCertStore {
  public:
   static void StoreCert(nsCString&& aOrigin, GeneratedCertificate&& aCert);
-  static GeneratedCertificate* LookupCert(
+  static RefPtr<SharedCertificate> LookupCert(
       const CertFingerprint aCertFingerprint);
   static void RemoveCert(const CertFingerprint aCertFingerprint);
   static void Clear();

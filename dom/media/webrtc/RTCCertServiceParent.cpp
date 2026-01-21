@@ -256,10 +256,10 @@ RefPtr<RTCCertificatePromise> RTCCertServiceParent::GenerateCertificate(
 
 RefPtr<RTCCertificatePromise> RTCCertServiceParent::GetCertificate(
     const CertFingerprint aCertFingerprint) {
-  if (GeneratedCertificate* cert = RTCCertStore::LookupCert(aCertFingerprint)) {
+  if (RefPtr<SharedCertificate> cert = RTCCertStore::LookupCert(aCertFingerprint)) {
     auto data = MakeUnique<CertData>(
-        UniqueCERTCertificate(CERT_DupCertificate(cert->mCertificate.get())),
-        cert->mExpires, cert->mCertFingerprint);
+        UniqueCERTCertificate(CERT_DupCertificate(cert->Cert().mCertificate.get())),
+        cert->Cert().mExpires, cert->Cert().mCertFingerprint);
     return RTCCertificatePromise::CreateAndResolve(std::move(data), __func__);
   }
   return RTCCertificatePromise::CreateAndReject(NS_ERROR_FAILURE, __func__);

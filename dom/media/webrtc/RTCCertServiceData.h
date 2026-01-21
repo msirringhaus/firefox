@@ -72,7 +72,7 @@ struct CertData {
         mExpires(aExpires),
         mFingerprint(std::move(aFingerprint)) {}
   explicit CertData(const CertDataIPC* aCertDataIPC);
-  explicit CertData(const GeneratedCertificate* aCertData);
+  explicit CertData(const GeneratedCertificate& aCertData);
 
   // Don't copy CertData
   CertData(const CertData&) = delete;

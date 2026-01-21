@@ -7,6 +7,7 @@
 #include "RTCCertService.h"
 
 #include "RTCCertServiceParent.h"
+#include "RTCCertStore.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/dom/RTCCertStore.h"
@@ -202,10 +203,10 @@ void RTCCertServiceLocal::RemoveCertificate(
 
 RefPtr<RTCCertificatePromise> RTCCertServiceLocal::GetCertificate(
     const CertFingerprint aCertFingerprint) {
-  GeneratedCertificate* certData = RTCCertStore::LookupCert(aCertFingerprint);
+  RefPtr<SharedCertificate> certData = RTCCertStore::LookupCert(aCertFingerprint);
   if (certData) {
     return RTCCertificatePromise::CreateAndResolve(
-        MakeUnique<CertData>(certData), __func__);
+        MakeUnique<CertData>(certData->Cert()), __func__);
   } else {
     return RTCCertificatePromise::CreateAndReject(NS_ERROR_FAILURE, __func__);
   }

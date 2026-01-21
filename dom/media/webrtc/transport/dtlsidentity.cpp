@@ -211,11 +211,11 @@ nsresult DtlsIdentity::ComputeFingerprint(const UniqueCERTCertificate& cert,
 
 const UniqueCERTCertificate& DtlsIdentity::cert() {
   if (!cert_) {
-    dom::GeneratedCertificate* genCert =
+    RefPtr<dom::SharedCertificate> genCert =
         dom::RTCCertStore::LookupCert(cert_fingerprint_);
     if (genCert) {
       cert_ = UniqueCERTCertificate(
-          CERT_DupCertificate(genCert->mCertificate.get()));
+          CERT_DupCertificate(genCert->Cert().mCertificate.get()));
     }
   }
   return cert_;
@@ -223,11 +223,11 @@ const UniqueCERTCertificate& DtlsIdentity::cert() {
 
 const UniqueSECKEYPrivateKey& DtlsIdentity::privkey() {
   if (!private_key_) {
-    dom::GeneratedCertificate* genCert =
+    RefPtr<dom::SharedCertificate> genCert =
         dom::RTCCertStore::LookupCert(cert_fingerprint_);
     if (genCert) {
       private_key_ = UniqueSECKEYPrivateKey(
-          SECKEY_CopyPrivateKey(genCert->mPrivateKey.get()));
+          SECKEY_CopyPrivateKey(genCert->Cert().mPrivateKey.get()));
     }
   }
   return private_key_;
